@@ -14,11 +14,9 @@ import { parseCatalog } from "../shared/xcstrings";
 import { allLanguageProgress } from "../shared/progress";
 import { langFromLproj, detectSourceLanguage, type LprojGroup } from "../editor/lproj";
 import { langName } from "../shared/langName";
+import { catalogFindGlob, EXCLUDE_GLOB } from "../editor/config";
 
 const STRINGS_GLOB = "**/*.lproj/*.strings";
-const CATALOG_GLOB = "**/*.xcstrings";
-const EXCLUDE_GLOB =
-  "{**/Pods/**,**/*.xcframework/**,**/Carthage/**,**/build/**,**/DerivedData/**,**/node_modules/**,**/.build/**}";
 
 /** Anti-flicker: hold the "Loading…" placeholder at least this long on the first
  * scan so a fast scan doesn't flash the spinner on and off (mirrors the grid). */
@@ -66,6 +64,7 @@ interface CatalogLanguageNode {
 interface LoadingNode {
   kind: "loading";
 }
+export type LocalizationNode = Node;
 type Node =
   | TableNode
   | LanguageNode
@@ -206,7 +205,7 @@ export class LocalizationsTreeProvider implements vscode.TreeDataProvider<Node> 
   }
 
   private async getCatalogs(): Promise<CatalogNode[]> {
-    const uris = await vscode.workspace.findFiles(CATALOG_GLOB, EXCLUDE_GLOB);
+    const uris = await vscode.workspace.findFiles(catalogFindGlob(), EXCLUDE_GLOB);
     return Promise.all(
       uris.map(async (uri) => ({
         kind: "catalog" as const,
@@ -390,7 +389,11 @@ export class LocalizationsTreeProvider implements vscode.TreeDataProvider<Node> 
         title: "Open Language Column",
         arguments: [node.catalogUri, node.lang],
       };
-      item.contextValue = "xcodeI18n.catalogLanguage";
+      // Only a target language can be removed — the source is what everything
+      // else is translated from. The suffix is what the menu's `when` matches.
+      item.contextValue = node.isSource
+        ? "xcodeI18n.catalogLanguage"
+        : "xcodeI18n.catalogLanguage.removable";
       return item;
     }
 
@@ -427,7 +430,9 @@ export class LocalizationsTreeProvider implements vscode.TreeDataProvider<Node> 
       title: "Open Localization",
       arguments: [node.uri, "xcodeI18n.stringsEditor"],
     };
-    item.contextValue = "xcodeI18n.language";
+    item.contextValue = node.isSource
+      ? "xcodeI18n.language"
+      : "xcodeI18n.language.removable";
     return item;
   }
 }

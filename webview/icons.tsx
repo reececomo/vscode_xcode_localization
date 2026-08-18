@@ -189,3 +189,23 @@ export function CircleFilledIcon(p: IconProps) {
     />
   );
 }
+
+/** "+" — add a string. */
+export function PlusIcon(p: IconProps) {
+  return <Codicon {...p} path="M14 7v1H8v6H7V8H1V7h6V1h1v6h6z" />;
+}
+
+/** "−" — remove a string. */
+export function MinusIcon(p: IconProps) {
+  return <Codicon {...p} path="M14 7v1H1V7h13z" />;
+}
+
+/** Trash — remove a language. */
+export function TrashIcon(p: IconProps) {
+  return (
+    <Codicon
+      {...p}
+      path="M10 3h3v1h-1v9l-1 1H4l-1-1V4H2V3h3V2a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1zM9 2H6v1h3V2zM4 13h7V4H4v9zm2-8H5v7h1V5zm3 0h1v7H9V5z"
+    />
+  );
+}

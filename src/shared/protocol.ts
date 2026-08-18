@@ -12,6 +12,15 @@ export interface Settings {
   mergeKeySource: boolean;
   /** Require a double-click to edit a cell (true) vs editing on a single click. */
   doubleClickToEdit: boolean;
+  /** Show the Comment column (Xcode's developer note, as its own column). */
+  showCommentColumn: boolean;
+  /** Show the State column (Xcode's translated / NEW / needs-review marker). */
+  showStateColumn: boolean;
+  /** Allow deleting keys Xcode manages automatically. Off by default, because
+   * such a key is extracted from source and returns on the next build. */
+  allowRemovingManagedStrings: boolean;
+  /** Display names for language tags `Intl` doesn't know, e.g. "en-Pseudo". */
+  languageNames: Record<string, string>;
 }
 
 /** Per-format feature gates. `.xcstrings` has them all; `.strings` lacks state /
@@ -34,6 +43,15 @@ export interface Capabilities {
    * so keys drift). True for .strings; false for .xcstrings (one file, one key
    * set, so a key can never be orphaned). Gates the "Orphaned" filter + badge. */
   orphanKeys: boolean;
+  /** Whether keys can be added to and removed from this file. */
+  manageKeys: boolean;
+  /** Whether languages can be added to / removed from this file. True for
+   * `.xcstrings` (all languages live in the one file); false for `.strings`,
+   * where a language is a whole sibling file and is managed from the sidebar. */
+  manageLanguages: boolean;
+  /** Whether the format records how a key got there (`extractionState`). Drives
+   * the "automatically managed, so not yours to delete" rule. */
+  tracksExtractionState: boolean;
   /** Whether the KEY doubles as the implicit source string for format-specifier
    * validation (true for .xcstrings, where the key is the dev-language string;
    * false for .strings, where the key is an identifier — only a real source
@@ -87,7 +105,10 @@ export type HostToWebview =
       type: "usage";
       counts: Record<string, number>;
       filesScanned: number;
-    };
+    }
+  /** A key was just added (or the host wants it shown): clear any filter hiding
+   * it, put the cursor on it and scroll it into view. */
+  | { type: "revealKey"; key: string };
 
 /** Webview → Host */
 export type WebviewToHost =
@@ -137,6 +158,19 @@ export type WebviewToHost =
   /** Discard unsaved in-memory edits and reload the document from disk — the
    * response to an `externalChange` banner's "Reload from disk" action. */
   | { type: "reload" }
+  /** Add a key. The host prompts for the name, so the webview sends none — that
+   * keeps the naming rules (uniqueness, emptiness) in one place and gets a
+   * native input box instead of an in-grid one. */
+  | { type: "addString" }
+  /** Delete keys. The host re-checks removability — including a fresh code scan
+   * when none has been run — and confirms before writing. */
+  | { type: "removeStrings"; keys: string[] }
+  /** Add a language: an empty `new` entry for every key, the same thing Xcode
+   * writes. The host prompts for the tag. */
+  | { type: "addLanguage" }
+  /** Remove a language from every key. Refused unless nothing is translated in
+   * it, so no work is ever lost. */
+  | { type: "removeLanguage"; lang: string }
   /** Persist this file's layout (chosen target columns + dragged widths) to the
    * host's `workspaceState`. `targets: null` means "never explicitly chosen". */
   | {

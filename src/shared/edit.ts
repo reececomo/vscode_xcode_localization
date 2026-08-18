@@ -16,7 +16,12 @@
 //   - slash '/' written raw (no \/), non-ASCII written raw → JSON.stringify
 //     already matches all three.
 
-import { findNodeAtLocation, parseTree, type Node } from "jsonc-parser";
+import {
+  findNodeAtLocation,
+  getNodeValue,
+  parseTree,
+  type Node,
+} from "jsonc-parser";
 
 /** A single offset-based replacement (the host turns it into a vscode.Range). */
 export interface TextReplace {
@@ -184,11 +189,14 @@ function insertLanguage(
     node: p,
   }));
 
-  // Empty object: `"localizations" : {}`
+  // Empty object — `{}` or Xcode's `{` + blank line + `}`. Replace everything
+  // BETWEEN the braces so the existing filler doesn't survive as a blank line.
   if (entries.length === 0) {
+    const open = locNode.offset + 1;
+    const close = locNode.offset + locNode.length - 1;
     return {
-      offset: locNode.offset + 1, // right after '{'
-      length: 0,
+      offset: open,
+      length: Math.max(0, close - open),
       newText: `${eol}${baseIndent}${block}${eol}${parentIndent}`,
     };
   }
@@ -379,8 +387,11 @@ function propValue(prop: Node): Node {
 }
 
 /**
- * Insert `"name" : <valueText>` into `objNode` at code-unit order among the
- * existing keys. Mirrors {@link insertLanguage} but for arbitrary properties.
+ * Insert `"name" : <valueText>` into `objNode`. `placement` defaults to
+ * code-unit order among the existing keys (the order Xcode writes every object
+ * in); `"end"` appends instead, for the one object whose order is not sorted —
+ * the `strings` table itself. Mirrors {@link insertLanguage} but for arbitrary
+ * properties.
  */
 function insertProperty(
   text: string,
@@ -388,7 +399,8 @@ function insertProperty(
   name: string,
   valueText: string,
   ctx: EditContext,
-  indentUnit: string
+  indentUnit: string,
+  placement: "code-unit" | "end" = "code-unit"
 ): TextReplace {
   const eol = ctx.eol;
   const parentIndent = lineIndentAt(text, objNode.offset); // the `… : {` line
@@ -397,20 +409,25 @@ function insertProperty(
 
   const props = (objNode.children ?? []).filter((c) => c.type === "property");
 
-  // Empty object: `{}` → `{ <prop> }`.
+  // Empty object — `{}` or Xcode's `{` + blank line + `}`. Replace everything
+  // BETWEEN the braces so the existing filler doesn't survive as a blank line.
   if (props.length === 0) {
+    const open = objNode.offset + 1;
+    const close = objNode.offset + objNode.length - 1;
     return {
-      offset: objNode.offset + 1, // right after '{'
-      length: 0,
+      offset: open,
+      length: Math.max(0, close - open),
       newText: `${eol}${baseIndent}${block}${eol}${parentIndent}`,
     };
   }
 
   let insertBefore: Node | null = null;
-  for (const p of props) {
-    if (name < String(p.children![0].value)) {
-      insertBefore = p;
-      break;
+  if (placement === "code-unit") {
+    for (const p of props) {
+      if (name < String(p.children![0].value)) {
+        insertBefore = p;
+        break;
+      }
     }
   }
 
@@ -432,38 +449,72 @@ function insertProperty(
 }
 
 /**
+ * Remove one or more named properties from `objNode`, fixing the surrounding
+ * commas so the JSON stays valid. Consecutive removals are collapsed into a
+ * single span — removing them one by one would produce overlapping edits
+ * whenever a run reaches the last property.
+ */
+function removeProperties(
+  text: string,
+  objNode: Node,
+  names: ReadonlySet<string>,
+  ctx?: EditContext
+): TextReplace[] {
+  const props = (objNode.children ?? []).filter((c) => c.type === "property");
+  const drop = props.map((p) => names.has(String(p.children![0].value)));
+  if (!drop.some(Boolean)) return [];
+
+  // Everything goes → empty the object out. Xcode writes an emptied object as
+  // a blank line between the braces, so match that when we know the EOL.
+  if (drop.every(Boolean)) {
+    const open = objNode.offset; // at '{'
+    const close = objNode.offset + objNode.length - 1; // at '}'
+    const filler = ctx ? `${ctx.eol}${ctx.eol}${lineIndentAt(text, open)}` : "";
+    return [{ offset: open + 1, length: close - (open + 1), newText: filler }];
+  }
+
+  const out: TextReplace[] = [];
+  let i = 0;
+  while (i < props.length) {
+    if (!drop[i]) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j + 1 < props.length && drop[j + 1]) j++;
+    if (j < props.length - 1) {
+      // Run is followed by a survivor → swallow it plus its trailing comma and
+      // indent, up to where the next kept property starts.
+      const next = props[j + 1];
+      out.push({
+        offset: props[i].offset,
+        length: next.offset - props[i].offset,
+        newText: "",
+      });
+    } else {
+      // Run ends the object → swallow the comma that precedes it instead.
+      const prev = props[i - 1];
+      const start = prev.offset + prev.length;
+      const end = props[j].offset + props[j].length;
+      out.push({ offset: start, length: end - start, newText: "" });
+    }
+    i = j + 1;
+  }
+  return out;
+}
+
+/**
  * Remove the named property from `objNode`, fixing the surrounding comma so the
  * JSON stays valid. Returns null if the property isn't present.
  */
 function removeProperty(
   text: string,
   objNode: Node,
-  name: string
+  name: string,
+  ctx?: EditContext
 ): TextReplace | null {
-  const props = (objNode.children ?? []).filter((c) => c.type === "property");
-  const idx = props.findIndex((p) => String(p.children![0].value) === name);
-  if (idx === -1) return null;
-  const prop = props[idx];
-
-  // Only property → empty the object out to `{}`.
-  if (props.length === 1) {
-    const open = objNode.offset; // at '{'
-    const close = objNode.offset + objNode.length - 1; // at '}'
-    return { offset: open + 1, length: close - (open + 1), newText: "" };
-  }
-
-  // Not last → drop this property plus its trailing comma/indent (everything up
-  // to where the next property starts).
-  if (idx < props.length - 1) {
-    const next = props[idx + 1];
-    return { offset: prop.offset, length: next.offset - prop.offset, newText: "" };
-  }
-
-  // Last → drop the preceding comma + this property.
-  const prev = props[idx - 1];
-  const start = prev.offset + prev.length;
-  const end = prop.offset + prop.length;
-  return { offset: start, length: end - start, newText: "" };
+  const edits = removeProperties(text, objNode, new Set([name]), ctx);
+  return edits[0] ?? null;
 }
 
 function findKeyObject(root: Node, key: string): Node | null {
@@ -492,7 +543,7 @@ export function setComment(
 
   if (comment.trim() === "") {
     if (!existing) return { edits: [] };
-    const rem = removeProperty(text, keyNode, "comment");
+    const rem = removeProperty(text, keyNode, "comment", ctx);
     return { edits: rem ? [rem] : [] };
   }
 
@@ -529,7 +580,7 @@ export function setShouldTranslate(
   if (value) {
     // Default → represented by absence.
     if (!existing) return { edits: [] };
-    const rem = removeProperty(text, keyNode, "shouldTranslate");
+    const rem = removeProperty(text, keyNode, "shouldTranslate", ctx);
     return { edits: rem ? [rem] : [] };
   }
 
@@ -591,4 +642,301 @@ export function applyReplaces(text: string, edits: TextReplace[]): string {
     out = out.slice(0, e.offset) + e.newText + out.slice(e.offset + e.length);
   }
   return out;
+}
+
+// ---- Xcode-style JSON rendering (used when whole sub-objects are created) ----
+//
+// Single-value edits above splice text directly, but adding a string or a
+// language creates entire nodes. Those are rendered here so a hand-added block
+// is byte-identical to one Xcode would have written: " : " between key and
+// value, 2-space indent, object keys in code-unit order, and — an Xcode quirk
+// worth matching — an empty object written as a blank line between its braces.
+
+/** JSON value in the shape Xcode writes into a String Catalog. */
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue | undefined };
+
+/**
+ * Render `value` as Xcode would, with `indent` as the indentation of the line
+ * the value starts on (i.e. its closing brace lines up with `indent`).
+ */
+export function renderJsonValue(
+  value: JsonValue,
+  indent: string,
+  eol: string,
+  indentUnit = "  "
+): string {
+  if (typeof value === "string") return jsonString(value);
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+
+  const inner = indent + indentUnit;
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return `[${eol}${eol}${indent}]`;
+    const items = value.map(
+      (v) => `${inner}${renderJsonValue(v, inner, eol, indentUnit)}`
+    );
+    return `[${eol}${items.join(`,${eol}`)}${eol}${indent}]`;
+  }
+
+  // Code-unit key order — the order Xcode writes every object in.
+  const keys = Object.keys(value)
+    .filter((k) => value[k] !== undefined)
+    .sort();
+  if (keys.length === 0) return `{${eol}${eol}${indent}}`;
+  const props = keys.map(
+    (k) =>
+      `${inner}${jsonString(k)} : ${renderJsonValue(
+        value[k] as JsonValue,
+        inner,
+        eol,
+        indentUnit
+      )}`
+  );
+  return `{${eol}${props.join(`,${eol}`)}${eol}${indent}}`;
+}
+
+// ---- Adding & removing strings ----
+
+/** The `strings` table node, or null when this isn't a String Catalog. */
+function findStringsTable(root: Node): Node | null {
+  const node = findNodeAtLocation(root, ["strings"]);
+  return node && node.type === "object" ? node : null;
+}
+
+/**
+ * Add a new key to the catalog.
+ *
+ * The key goes at the END of the `strings` table rather than in sorted position:
+ * Xcode's own key order follows a comparator that matches no standard sort, so
+ * there is no "correct" slot to insert into — appending keeps the diff to a
+ * single added block and Xcode re-files it on its next write.
+ *
+ * The entry is marked `extractionState: "manual"`, which is what Xcode writes
+ * for a hand-added string; it is also what makes the string removable again
+ * (an automatically extracted key would just come back on the next build).
+ */
+export function addString(
+  text: string,
+  key: string,
+  ctx: EditContext
+): EditResult {
+  const root = parseTree(text);
+  if (!root) return { edits: [], reason: "JSON could not be parsed" };
+  const indentUnit = ctx.indentUnit ?? "  ";
+
+  const stringsNode = findStringsTable(root);
+  if (!stringsNode) {
+    return { edits: [], reason: "this file has no 'strings' table" };
+  }
+  if (findProperty(stringsNode, key)) {
+    return { edits: [], reason: `the key "${key}" already exists` };
+  }
+
+  const indent = lineIndentAt(text, stringsNode.offset) + indentUnit;
+  const valueText = renderJsonValue(
+    { extractionState: "manual" },
+    indent,
+    ctx.eol,
+    indentUnit
+  );
+  return {
+    edits: [
+      insertProperty(text, stringsNode, key, valueText, ctx, indentUnit, "end"),
+    ],
+  };
+}
+
+/** Delete whole keys (with every localization) from the catalog. */
+export function removeStrings(
+  text: string,
+  keys: string[],
+  ctx: EditContext
+): EditResult {
+  const root = parseTree(text);
+  if (!root) return { edits: [], reason: "JSON could not be parsed" };
+
+  const stringsNode = findStringsTable(root);
+  if (!stringsNode) {
+    return { edits: [], reason: "this file has no 'strings' table" };
+  }
+  const edits = removeProperties(text, stringsNode, new Set(keys), ctx);
+  if (edits.length === 0) {
+    return { edits: [], reason: "no such key in this catalog" };
+  }
+  return { edits };
+}
+
+// ---- Adding & removing languages ----
+
+/**
+ * Build the localization node for a language that has nothing translated yet.
+ * The shape is cloned from `template` (the source language's node for the same
+ * key) so plural / device variants and substitutions line up; every leaf value
+ * is emptied and marked `new`. Substitution metadata (`formatSpecifier`,
+ * `argNum`) is copied verbatim because it cannot be synthesized.
+ */
+function emptyLocalization(template: unknown): JsonValue {
+  const blank: JsonValue = { stringUnit: { state: "new", value: "" } };
+  if (!template || typeof template !== "object" || Array.isArray(template)) {
+    return blank;
+  }
+  const node = template as Record<string, unknown>;
+  const out: { [key: string]: JsonValue } = {};
+
+  if (node.formatSpecifier !== undefined) {
+    out.formatSpecifier = node.formatSpecifier as JsonValue;
+  }
+  if (node.argNum !== undefined) out.argNum = node.argNum as JsonValue;
+  if (node.stringUnit) out.stringUnit = { state: "new", value: "" };
+
+  const variations = node.variations as Record<string, unknown> | undefined;
+  if (variations) {
+    const dims: { [key: string]: JsonValue } = {};
+    for (const [dimension, cases] of Object.entries(variations)) {
+      if (!cases || typeof cases !== "object") continue;
+      const forms: { [key: string]: JsonValue } = {};
+      for (const [name, sub] of Object.entries(
+        cases as Record<string, unknown>
+      )) {
+        forms[name] = emptyLocalization(sub);
+      }
+      dims[dimension] = forms;
+    }
+    out.variations = dims;
+  }
+
+  const substitutions = node.substitutions as Record<string, unknown> | undefined;
+  if (substitutions) {
+    const subs: { [key: string]: JsonValue } = {};
+    for (const [name, sub] of Object.entries(substitutions)) {
+      subs[name] = emptyLocalization(sub);
+    }
+    out.substitutions = subs;
+  }
+
+  // A node with neither a value nor variants would render as an empty object,
+  // which is not a localization — fall back to a plain empty string unit.
+  if (!out.stringUnit && !out.variations && !out.substitutions) return blank;
+  return out;
+}
+
+/**
+ * Add a language to every key in the catalog, with an empty `new` string unit
+ * per translatable leaf — the same thing Xcode writes when you add a language,
+ * so the file round-trips through Xcode without a reformat. Keys that already
+ * carry the language are left alone.
+ */
+export function addLanguage(
+  text: string,
+  lang: string,
+  ctx: EditContext
+): EditResult {
+  const root = parseTree(text);
+  if (!root) return { edits: [], reason: "JSON could not be parsed" };
+  const indentUnit = ctx.indentUnit ?? "  ";
+
+  const stringsNode = findStringsTable(root);
+  if (!stringsNode) {
+    return { edits: [], reason: "this file has no 'strings' table" };
+  }
+  const sourceNode = findNodeAtLocation(root, ["sourceLanguage"]);
+  const sourceLanguage =
+    typeof sourceNode?.value === "string" ? sourceNode.value : "";
+
+  const edits: TextReplace[] = [];
+  for (const prop of stringsNode.children ?? []) {
+    if (prop.type !== "property" || !prop.children) continue;
+    const keyObj = prop.children[1];
+    if (keyObj.type !== "object") continue;
+
+    const locProp = findProperty(keyObj, "localizations");
+    if (!locProp) {
+      // No localizations at all yet → create the whole property.
+      const indent = lineIndentAt(text, keyObj.offset) + indentUnit;
+      const valueText = renderJsonValue(
+        { [lang]: emptyLocalization(undefined) },
+        indent,
+        ctx.eol,
+        indentUnit
+      );
+      edits.push(
+        insertProperty(text, keyObj, "localizations", valueText, ctx, indentUnit)
+      );
+      continue;
+    }
+
+    const locObj = propValue(locProp);
+    if (locObj.type !== "object") continue;
+    if (findProperty(locObj, lang)) continue;
+
+    const template = sourceLanguage
+      ? findProperty(locObj, sourceLanguage)
+      : null;
+    const shape = emptyLocalization(
+      template ? getNodeValue(propValue(template)) : undefined
+    );
+    const indent = lineIndentAt(text, locObj.offset) + indentUnit;
+    const valueText = renderJsonValue(shape, indent, ctx.eol, indentUnit);
+    edits.push(insertProperty(text, locObj, lang, valueText, ctx, indentUnit));
+  }
+
+  if (edits.length === 0) {
+    return { edits: [], reason: `${lang} is already in this catalog` };
+  }
+  return { edits };
+}
+
+/**
+ * Remove a language from every key. Callers are expected to have checked that
+ * the language has nothing translated (see `languageIsEmpty`) — this only does
+ * the edit. A key left with no localizations at all loses the now-empty
+ * `localizations` property too, which is how Xcode writes such a key.
+ */
+export function removeLanguage(
+  text: string,
+  lang: string,
+  ctx: EditContext
+): EditResult {
+  const root = parseTree(text);
+  if (!root) return { edits: [], reason: "JSON could not be parsed" };
+
+  const stringsNode = findStringsTable(root);
+  if (!stringsNode) {
+    return { edits: [], reason: "this file has no 'strings' table" };
+  }
+
+  const edits: TextReplace[] = [];
+  for (const prop of stringsNode.children ?? []) {
+    if (prop.type !== "property" || !prop.children) continue;
+    const keyObj = prop.children[1];
+    if (keyObj.type !== "object") continue;
+
+    const locProp = findProperty(keyObj, "localizations");
+    if (!locProp) continue;
+    const locObj = propValue(locProp);
+    if (locObj.type !== "object") continue;
+    if (!findProperty(locObj, lang)) continue;
+
+    const remaining = (locObj.children ?? []).filter(
+      (c) => c.type === "property"
+    ).length;
+    if (remaining <= 1) {
+      const rem = removeProperty(text, keyObj, "localizations", ctx);
+      if (rem) edits.push(rem);
+    } else {
+      const rem = removeProperty(text, locObj, lang, ctx);
+      if (rem) edits.push(rem);
+    }
+  }
+
+  if (edits.length === 0) {
+    return { edits: [], reason: `${lang} is not in this catalog` };
+  }
+  return { edits };
 }

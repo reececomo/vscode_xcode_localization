@@ -22,11 +22,12 @@ import { diffSpecifiers, tokenizeFormat } from "../src/shared/format";
 import { findRanges } from "../src/shared/search";
 import type { LangProgress } from "../src/shared/progress";
 import { useRowVirtualizer } from "./virtualizer";
-import { WarningIcon, KebabIcon, SearchIcon } from "./icons";
+import { WarningIcon, KebabIcon, SearchIcon, CheckIcon, TrashIcon } from "./icons";
 import { Menu, MenuItem, MenuSeparator, type MenuPos } from "./Menu";
 import { baselineCell, cellChange, type Baseline } from "./diff";
 import { langName } from "../src/shared/langName";
 import type { Capabilities } from "../src/shared/protocol";
+import type { Removability } from "../src/shared/manage";
 
 /** Viewport coords from a mouse event (cursor for right-click). */
 function posFromCursor(e: { clientX: number; clientY: number }): MenuPos {
@@ -50,14 +51,20 @@ const ROW_ESTIMATE = 46;
 // horizontal scroll. Widths are stored per column id: the key column under
 // KEY_COL_ID, every language column under its code.
 const KEY_COL_ID = "$key";
+// Xcode's two metadata columns, between the key and the languages.
+const COMMENT_COL_ID = "$comment";
+const STATE_COL_ID = "$state";
 const DEFAULT_KEY_WIDTH = 260;
 // Merged view's first column holds the source string (prose), so it defaults a
 // touch wider than the plain Key column. Same stored id (KEY_COL_ID) — a drag
 // carries across both views.
 const DEFAULT_REF_WIDTH = 340;
 const DEFAULT_COL_WIDTH = 300;
+const DEFAULT_COMMENT_WIDTH = 200;
+const DEFAULT_STATE_WIDTH = 50;
 const MIN_KEY_WIDTH = 140;
 const MIN_COL_WIDTH = 120;
+const MIN_META_WIDTH = 70;
 
 /**
  * The grab strip on a header cell's right edge. Drag to resize the column live;
@@ -241,6 +248,15 @@ interface GridProps {
   doubleClickToEdit: boolean;
   /** Per-format feature gates (review state / don't-translate / comment edit). */
   caps: Capabilities;
+  /** Show the Comment column (the note moves out of the key cell into it). */
+  showComment: boolean;
+  /** Show the State column. It describes ONE language — `stateLang` — because a
+   * string's state is per translation; that language's in-cell badge is dropped
+   * so the same fact isn't shown twice. */
+  showState: boolean;
+  /** Language the State column describes: the first displayed target, or the
+   * source when no target is shown. */
+  stateLang: string;
   /** Live column resize (while dragging). */
   onResize(colId: string, px: number): void;
   /** Reset a column to its default width (double-click). */
@@ -258,6 +274,16 @@ interface GridProps {
   /** Per-key count of code references from the last on-demand scan (null = not
    * scanned). A key whose count is exactly 0 is flagged "unused". */
   usage?: Record<string, number> | null;
+  /** Report the key under the cursor so the toolbar's "−" knows what it acts on
+   * (null when nothing is selected). */
+  onSelectionChange(key: string | null): void;
+  /** Whether this key may be deleted, and why not when it may not. */
+  canRemoveKey(entry: CatalogEntry): Removability;
+  /** Ask the host to delete a key (it confirms first). */
+  onRemoveKey(key: string): void;
+  /** Put the cursor on this key and scroll to it — used after adding one. The
+   * counter makes repeat reveals of the same key distinct. */
+  reveal: { key: string; seq: number } | null;
 }
 
 interface EditingCell {
@@ -318,6 +344,9 @@ export function Grid({
   merged,
   doubleClickToEdit,
   caps,
+  showComment,
+  showState,
+  stateLang,
   onResize,
   onResetWidth,
   onSetValue,
@@ -326,6 +355,10 @@ export function Grid({
   onSetState,
   onFindInCode,
   usage,
+  onSelectionChange,
+  canRemoveKey,
+  onRemoveKey,
+  reveal,
 }: GridProps) {
   const [editing, setEditing] = useState<EditingCell | null>(null);
   const [editingNote, setEditingNote] = useState<string | null>(null);
@@ -356,9 +389,43 @@ export function Grid({
   const keyWidth =
     widths[KEY_COL_ID] ?? (merged ? DEFAULT_REF_WIDTH : DEFAULT_KEY_WIDTH);
 
-  // Widths in render order: the frozen first column (Key/ref), then each value
-  // column. The LAST column flexes to fill the pane; the rest are fixed px.
-  const colWidths = [keyWidth, ...valueLangs.map(colWidth)];
+  // The optional metadata columns, in Xcode's order, between the key and the
+  // languages. Each is toggled from the toolbar menu.
+  const metaCols: { id: string; label: string; width: number }[] = [];
+  if (showComment) {
+    metaCols.push({
+      id: COMMENT_COL_ID,
+      label: "Comment",
+      width: widths[COMMENT_COL_ID] ?? DEFAULT_COMMENT_WIDTH,
+    });
+  }
+  if (showState) {
+    metaCols.push({
+      id: STATE_COL_ID,
+      label: "State",
+      width: widths[STATE_COL_ID] ?? DEFAULT_STATE_WIDTH,
+    });
+  }
+
+  // Where the metadata columns go. Merged view folds the source into the frozen
+  // key column, so they follow it directly. Split view keeps the source as its
+  // own STICKY column pinned beside the key — putting anything between the two
+  // would leave the pinned column floating over it — so there they follow the
+  // source instead. Either way they land between the source and the targets,
+  // with State right beside the language it reports on.
+  const metaAfter =
+    !merged && sourceLanguage !== "" && valueLangs[0] === sourceLanguage ? 1 : 0;
+  const leadingLangs = valueLangs.slice(0, metaAfter);
+  const trailingLangs = valueLangs.slice(metaAfter);
+
+  // Widths in render order. The LAST column flexes to fill the pane; the rest
+  // are fixed px.
+  const colWidths = [
+    keyWidth,
+    ...leadingLangs.map(colWidth),
+    ...trailingLangs.map(colWidth),
+    ...metaCols.map((c) => c.width),
+  ];
   const lastIdx = colWidths.length - 1;
   const cols = colWidths
     .map((w, i) => (i === lastIdx ? `minmax(${w}px, 1fr)` : `${w}px`))
@@ -367,10 +434,12 @@ export function Grid({
   // fixed columns can't fit — instead of stretching to fit the longest cell on
   // one line. That lets the flexible last column WRAP within the pane.
   const minGridWidth = colWidths.reduce((s, w) => s + w, 0);
-  // The frozen first column can host a resize handle only when a value column
-  // follows it (otherwise it is itself the last/flex column).
-  const firstResizable = valueLangs.length > 0;
-  const lastValueIdx = valueLangs.length - 1;
+  // Every column but the last carries a resize handle (the last one flexes).
+  const totalCols = colWidths.length;
+  const resizable = (columnIndex: number) => columnIndex < totalCols - 1;
+  /** Position of a value column in the full left-to-right order. */
+  const langColumnIndex = (i: number) => 1 + i;
+  const firstResizable = resizable(0);
 
   // The keyboard cursor / RO-measured heights depend on column WIDTHS too (text
   // wraps differently), but clearing the cache on every drag tick would thrash
@@ -427,7 +496,7 @@ export function Grid({
   // Cached heights go stale when the rendered columns, the view mode, the widths
   // or the density change (cells wrap / pad differently) → fold them all into
   // the reset key.
-  const colsKey = `${valueLangs.join("|")}|m:${merged ? 1 : 0}|d:${density}|w:${widthEpoch}`;
+  const colsKey = `${valueLangs.join("|")}|m:${merged ? 1 : 0}|d:${density}|w:${widthEpoch}|x:${metaCols.map((c) => c.id).join(",")}`;
   const v = useRowVirtualizer(keys, ROW_ESTIMATE, colsKey);
 
   // ---- Keyboard navigation ----
@@ -596,6 +665,27 @@ export function Grid({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
+  // Tell the toolbar which key the cursor is on, so "−" knows what it deletes.
+  useEffect(() => {
+    onSelectionChange(active?.key ?? null);
+  }, [active?.key, onSelectionChange]);
+
+  // A freshly added key: put the cursor on it and bring it into view. It may not
+  // be in `flatRows` yet if the reveal beat the reparse — harmless, the user is
+  // simply left where they were.
+  useEffect(() => {
+    if (!reveal) return;
+    const i = flatRows.findIndex(
+      (fr) => fr.kind !== "header" && fr.entry.key === reveal.key
+    );
+    if (i < 0) return;
+    const cell = cellAt(i, startCol);
+    if (cell) setActive(cell);
+    v.ensureVisible(i);
+    containerRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal]);
+
   const onGridKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     // Editing / inline note / open menu own the keyboard; let them have it.
     if (editing || editingNote !== null || menu) return;
@@ -647,6 +737,53 @@ export function Grid({
     const f = firstNavRow();
     const first = f >= 0 ? cellAt(f, startCol) : null;
     if (first) setActive(first);
+  };
+
+  /** One language column header: name, code, source tag or progress bar. `i` is
+   * the language's index in `valueLangs`; the resize handle depends on where the
+   * column actually sits once the metadata columns are interleaved. */
+  const langHeader = (lang: string, i: number) => {
+    const isSource = lang === sourceLanguage;
+    const p = progress[lang];
+    return (
+      <div
+        key={lang}
+        className={isSource ? "cell col-source" : "cell head-cell"}
+      >
+        <div className="head-top">
+          <span className="head-lang" title={`${langName(lang)} (${lang})`}>
+            <span className="head-name">{langName(lang)}</span>
+            <span className="head-code">{lang}</span>
+          </span>
+          {isSource ? (
+            <span className="lang-tag">source</span>
+          ) : (
+            p && <span className="head-pct">{p.percent}%</span>
+          )}
+        </div>
+        {!isSource && p && (
+          <div
+            className="head-prog"
+            title={`${lang}: ${p.translated}/${p.total} translated${
+              p.needsReview ? `, ${p.needsReview} needs review` : ""
+            }`}
+          >
+            <div className="head-prog-fill" style={{ width: `${p.percent}%` }} />
+          </div>
+        )}
+        {resizable(langColumnIndex(i)) && (
+          <ColResizer
+            colId={lang}
+            width={colWidth(lang)}
+            min={MIN_COL_WIDTH}
+            label={langName(lang)}
+            onResize={onResize}
+            onReset={onResetWidth}
+            onCommit={commitResize}
+          />
+        )}
+      </div>
+    );
   };
 
   return (
@@ -704,55 +841,26 @@ export function Grid({
               />
             )}
           </div>
-          {valueLangs.map((lang, i) => {
-            const isSource = lang === sourceLanguage;
-            const p = progress[lang];
-            return (
-              <div
-                key={lang}
-                className={isSource ? "cell col-source" : "cell head-cell"}
-              >
-                <div className="head-top">
-                  <span
-                    className="head-lang"
-                    title={`${langName(lang)} (${lang})`}
-                  >
-                    <span className="head-name">{langName(lang)}</span>
-                    <span className="head-code">{lang}</span>
-                  </span>
-                  {isSource ? (
-                    <span className="lang-tag">source</span>
-                  ) : (
-                    p && <span className="head-pct">{p.percent}%</span>
-                  )}
-                </div>
-                {!isSource && p && (
-                  <div
-                    className="head-prog"
-                    title={`${lang}: ${p.translated}/${p.total} translated${
-                      p.needsReview ? `, ${p.needsReview} needs review` : ""
-                    }`}
-                  >
-                    <div
-                      className="head-prog-fill"
-                      style={{ width: `${p.percent}%` }}
-                    />
-                  </div>
-                )}
-                {i !== lastValueIdx && (
-                  <ColResizer
-                    colId={lang}
-                    width={colWidth(lang)}
-                    min={MIN_COL_WIDTH}
-                    label={langName(lang)}
-                    onResize={onResize}
-                    onReset={onResetWidth}
-                    onCommit={commitResize}
-                  />
-                )}
+          {leadingLangs.map((lang) => langHeader(lang, valueLangs.indexOf(lang)))}
+          {trailingLangs.map((lang, i) => langHeader(lang, metaAfter + i))}
+          {metaCols.map((col, i) => (
+            <div key={col.id} className="cell head-meta">
+              <div className="head-top">
+                <span className="head-name">{col.label}</span>
               </div>
-            );
-          })}
+              {resizable(1 + metaAfter + i) && (
+                <ColResizer
+                  colId={col.id}
+                  width={col.width}
+                  min={MIN_META_WIDTH}
+                  label={col.label}
+                  onResize={onResize}
+                  onReset={onResetWidth}
+                  onCommit={commitResize}
+                />
+              )}
+            </div>
+          ))}
         </div>
 
         <div className="grid-body" ref={v.bodyRef}>
@@ -787,6 +895,11 @@ export function Grid({
                     editSeed={editSeed}
                     doubleClickToEdit={doubleClickToEdit}
                     caps={caps}
+                    showComment={showComment}
+                    showState={showState}
+                    stateLang={stateLang}
+                    metaAfter={metaAfter}
+                    cursorLang={langs[startCol]}
                     unused={!!usage && usage[fr.entry.key] === 0}
                     onActivate={activate}
                     onStartEdit={startEdit}
@@ -854,6 +967,27 @@ export function Grid({
             }}
           />
         )}
+        {caps.manageKeys &&
+          (() => {
+            // Same verdict the toolbar's "−" uses, so the two never disagree —
+            // and the tooltip says why when the item is greyed out.
+            const verdict = canRemoveKey(menu.entry);
+            return (
+              <>
+                <MenuSeparator />
+                <MenuItem
+                  label="Delete String"
+                  icon={<TrashIcon size={13} />}
+                  disabled={!verdict.canRemove}
+                  title={verdict.reason || undefined}
+                  onSelect={() => {
+                    onRemoveKey(menu.entry.key);
+                    closeMenu();
+                  }}
+                />
+              </>
+            );
+          })()}
       </Menu>
     )}
 
@@ -930,6 +1064,17 @@ interface RowViewProps {
   doubleClickToEdit: boolean;
   /** Per-format feature gates. */
   caps: Capabilities;
+  /** Render the Comment column (and drop the note from the key cell). */
+  showComment: boolean;
+  /** Render the State column. */
+  showState: boolean;
+  /** Language the State column reports on. */
+  stateLang: string;
+  /** How many value columns precede the metadata columns — 1 when a sticky
+   * source column has to stay adjacent to the key, 0 otherwise. */
+  metaAfter: number;
+  /** Column the cursor lands on when the row is picked from the key cell. */
+  cursorLang: string;
   /** This key had 0 code references in the last scan → flag it "unused". */
   unused: boolean;
   /** Move the keyboard cursor onto a cell (click / right-click). */
@@ -964,6 +1109,11 @@ function RowView({
   editSeed,
   doubleClickToEdit,
   caps,
+  showComment,
+  showState,
+  stateLang,
+  metaAfter,
+  cursorLang,
   unused,
   onActivate,
   onStartEdit,
@@ -1023,9 +1173,17 @@ function RowView({
   const openStringMenu = (pos: MenuPos) =>
     setMenu({ kind: "string", entry, pos });
 
+  // Clicking the key column selects the row, so the toolbar's "−" has something
+  // to act on even in a read-only source column.
+  const selectRow = () =>
+    onActivate({ key: entry.key, lang: cursorLang, variantKey: row.variantKey });
+
   const noteProps = {
     editingNote,
     canEditComment: caps.editComment,
+    // The note lives in the Comment column when that column is on — showing it
+    // in both places would just duplicate it.
+    hideNote: showComment,
     onNoteEditStart: () => setEditingNote(entry.key),
     onNoteCommit: (val: string) => {
       if ((entry.comment ?? "") !== val) onSetComment(entry.key, val);
@@ -1073,32 +1231,68 @@ function RowView({
       onSourceStartEdit={() => onStartEdit(srcCellId)}
       onSourceResolve={(val, move) => onCommitMove(srcCellId, val, move)}
       onSourceCancel={() => onCancelEdit(srcCellId)}
+      onSelect={selectRow}
       {...noteProps}
     />
   ) : kind === "variant" ? (
-    <VariantKeyCell row={row} onOpenMenu={openStringMenu} />
+    <VariantKeyCell row={row} onOpenMenu={openStringMenu} onSelect={selectRow} />
   ) : (
     <KeyHeaderCell
       entry={entry}
       isOrphan={isOrphan}
       isUnused={unused}
       onOpenMenu={openStringMenu}
+      onSelect={selectRow}
       {...noteProps}
     />
+  );
+
+  // The note belongs to the key, so a variant sub-row leaves the Comment cell
+  // empty; the state, being per translation, is shown on each variant instead of
+  // on the key's header row.
+  const metaCells = (
+    <>
+      {showComment && (
+        <CommentCell
+          comment={entry.comment}
+          blank={kind === "variant"}
+          editable={caps.editComment && kind !== "variant"}
+          editing={editingNote}
+          onEditStart={() => setEditingNote(entry.key)}
+          onCommit={(value) => {
+            if ((entry.comment ?? "") !== value) onSetComment(entry.key, value);
+            setEditingNote(null);
+          }}
+          onCancel={() => setEditingNote(null)}
+          onSelect={selectRow}
+        />
+      )}
+      {showState && (
+        <StateCell
+          cell={row.cells[stateLang]}
+          blank={kind === "header"}
+          translatable={translatable}
+          onSelect={selectRow}
+        />
+      )}
+    </>
   );
 
   // Header row of a plural/device key: just the first column + its actions; the
   // value columns stay empty (each form is rendered on its own variant row).
   if (kind === "header") {
+    const blanks = valueLangs.map((lang) => (
+      <div
+        key={lang}
+        className={lang === sourceLanguage ? "cell col-source" : "cell"}
+      />
+    ));
     return (
       <div className={cls} ref={setRef}>
         {firstCell}
-        {valueLangs.map((lang) => (
-          <div
-            key={lang}
-            className={lang === sourceLanguage ? "cell col-source" : "cell"}
-          />
-        ))}
+        {blanks.slice(0, metaAfter)}
+        {blanks.slice(metaAfter)}
+        {metaCells}
       </div>
     );
   }
@@ -1130,6 +1324,8 @@ function RowView({
         ? (pos: MenuPos) => setMenu({ kind: "cell", entry, row, lang, pos })
         : undefined;
 
+    // The State column already reports this language — don't say it twice.
+    const hideStateBadge = showState && lang === stateLang;
     const cellId: EditingCell = { key: entry.key, lang, variantKey: row.variantKey };
     const isActive =
       !!active &&
@@ -1151,6 +1347,7 @@ function RowView({
           onActivate={isSource ? undefined : () => onActivate(cellId)}
           changeKind={changeKind}
           oldValue={oldValue}
+          hideStateBadge={hideStateBadge}
         />
       );
     }
@@ -1182,6 +1379,7 @@ function RowView({
         onMenu={onMenu}
         changeKind={changeKind}
         oldValue={oldValue}
+        hideStateBadge={hideStateBadge}
       />
     );
   });
@@ -1189,7 +1387,9 @@ function RowView({
   return (
     <div className={cls} ref={setRef}>
       {firstCell}
-      {valueCells}
+      {valueCells.slice(0, metaAfter)}
+      {valueCells.slice(metaAfter)}
+      {metaCells}
     </div>
   );
 }
@@ -1284,8 +1484,10 @@ function RefCell({
   onSourceStartEdit,
   onSourceResolve,
   onSourceCancel,
+  onSelect,
   editingNote,
   canEditComment,
+  hideNote,
   onNoteEditStart,
   onNoteCommit,
   onNoteCancel,
@@ -1307,8 +1509,12 @@ function RefCell({
   onSourceStartEdit(): void;
   onSourceResolve(value: string, move: Move): void;
   onSourceCancel(): void;
+  /** Put the row cursor here — the fallback when the source isn't editable. */
+  onSelect(): void;
   editingNote: boolean;
   canEditComment: boolean;
+  /** The note is rendered in the Comment column instead. */
+  hideNote?: boolean;
   onNoteEditStart(): void;
   onNoteCommit(value: string): void;
   onNoteCancel(): void;
@@ -1374,6 +1580,7 @@ function RefCell({
   return (
     <div
       className={"cell key ref-col" + (isVariant ? " key-variant" : "")}
+      onClick={canEditSource ? undefined : onSelect}
       onContextMenu={
         onOpenMenu
           ? (e) => {
@@ -1414,7 +1621,7 @@ function RefCell({
           )}
         </>
       )}
-      {!isVariant && (
+      {!isVariant && !hideNote && (
         <KeyNote
           comment={entry.comment}
           editingNote={editingNote}
@@ -1469,8 +1676,10 @@ function KeyHeaderCell({
   isOrphan,
   isUnused,
   onOpenMenu,
+  onSelect,
   editingNote,
   canEditComment,
+  hideNote,
   onNoteEditStart,
   onNoteCommit,
   onNoteCancel,
@@ -1479,8 +1688,10 @@ function KeyHeaderCell({
   isOrphan?: boolean;
   isUnused?: boolean;
   onOpenMenu?: (pos: MenuPos) => void;
+  onSelect(): void;
   editingNote: boolean;
   canEditComment: boolean;
+  hideNote?: boolean;
   onNoteEditStart(): void;
   onNoteCommit(value: string): void;
   onNoteCancel(): void;
@@ -1489,6 +1700,7 @@ function KeyHeaderCell({
   return (
     <div
       className="cell key key-actionable"
+      onClick={onSelect}
       onContextMenu={
         onOpenMenu
           ? (e) => {
@@ -1506,14 +1718,16 @@ function KeyHeaderCell({
           <Kebab onOpen={onOpenMenu} label="Key actions" className="row-kebab" />
         )}
       </div>
-      <KeyNote
-        comment={entry.comment}
-        editingNote={editingNote}
-        canEditComment={canEditComment}
-        onEditStart={onNoteEditStart}
-        onCommit={onNoteCommit}
-        onCancel={onNoteCancel}
-      />
+      {!hideNote && (
+        <KeyNote
+          comment={entry.comment}
+          editingNote={editingNote}
+          canEditComment={canEditComment}
+          onEditStart={onNoteEditStart}
+          onCommit={onNoteCommit}
+          onCancel={onNoteCancel}
+        />
+      )}
       {(isOrphan || isUnused || !entry.shouldTranslate) && (
         <div className="key-flags">
           {isOrphan && <OrphanFlag />}
@@ -1533,13 +1747,16 @@ function KeyHeaderCell({
 function VariantKeyCell({
   row,
   onOpenMenu,
+  onSelect,
 }: {
   row: CatalogRow;
   onOpenMenu?: (pos: MenuPos) => void;
+  onSelect(): void;
 }) {
   return (
     <div
       className="cell key key-variant"
+      onClick={onSelect}
       onContextMenu={
         onOpenMenu
           ? (e) => {
@@ -1634,6 +1851,7 @@ function ReadonlyCell({
   onActivate,
   changeKind,
   oldValue,
+  hideStateBadge,
 }: {
   cell: CatalogCell | undefined;
   fallback?: string;
@@ -1645,6 +1863,8 @@ function ReadonlyCell({
   onActivate?: () => void;
   changeKind?: ChangeKind;
   oldValue?: string;
+  /** The State column already reports this language — skip the in-cell badge. */
+  hideStateBadge?: boolean;
 }) {
   const base = sticky ? "cell col-source" : "cell";
   const activeCls = active ? " cell-active" : "";
@@ -1687,10 +1907,130 @@ function ReadonlyCell({
       <div className={isEmpty ? "cell-value cell-empty" : "cell-value"}>
         {isEmpty ? emptyText : <FormatValue value={cell.value} />}
       </div>
-      <StateBadge state={cell.state} />
+      {!hideStateBadge && <StateBadge state={cell.state} />}
       {warn && <FormatWarning warn={warn} />}
       {onMenu && <Kebab onOpen={onMenu} label="Review state" className="cell-kebab" />}
     </div>
+  );
+}
+
+/**
+ * The Comment column: a key's developer note, in its own column the way Xcode
+ * shows it. Rendered fainter than a translation — it is guidance for whoever
+ * translates the row, not content. Editable in place wherever the format lets
+ * the note be written (see `Capabilities.editComment`).
+ */
+function CommentCell({
+  comment,
+  blank,
+  editable,
+  editing,
+  onEditStart,
+  onCommit,
+  onCancel,
+  onSelect,
+}: {
+  comment?: string;
+  /** Variant sub-rows share the key's note, so theirs is left empty. */
+  blank: boolean;
+  editable: boolean;
+  editing: boolean;
+  onEditStart(): void;
+  onCommit(value: string): void;
+  onCancel(): void;
+  onSelect(): void;
+}) {
+  const query = useContext(QueryContext);
+  if (blank) return <div className="cell cell-comment" />;
+  if (editable && editing) {
+    return (
+      <div className="cell cell-comment cell-editing">
+        <NoteEditor
+          initial={comment ?? ""}
+          onCommit={onCommit}
+          onCancel={onCancel}
+        />
+      </div>
+    );
+  }
+  return (
+    <div
+      className={"cell cell-comment" + (editable ? " cell-comment-editable" : "")}
+      title={editable ? "Click to edit this note" : comment}
+      onClick={editable ? onEditStart : onSelect}
+    >
+      {comment ? (
+        <div className="comment-text">
+          <Highlight text={comment} query={query} />
+        </div>
+      ) : (
+        editable && <div className="comment-placeholder">Add a note…</div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The State column: Xcode's at-a-glance answer to "is this string done?" — a
+ * green check when it is, an orange NEW square when it has never been
+ * translated, a labelled chip for every other state.
+ */
+function StateCell({
+  cell,
+  blank,
+  translatable,
+  onSelect,
+}: {
+  cell: CatalogCell | undefined;
+  /** The header row of a plural key has no single state — each form has one. */
+  blank: boolean;
+  translatable: boolean;
+  onSelect(): void;
+}) {
+  return (
+    <div className="cell cell-state" onClick={onSelect}>
+      {!blank && <StateMark cell={cell} translatable={translatable} />}
+    </div>
+  );
+}
+
+/** The state marker itself, so the column and any other caller agree. */
+function StateMark({
+  cell,
+  translatable,
+}: {
+  cell: CatalogCell | undefined;
+  translatable: boolean;
+}) {
+  if (!translatable) {
+    return (
+      <span className="state-chip state-muted" title="Marked don't translate">
+        DON'T TRANSLATE
+      </span>
+    );
+  }
+  const empty = !cell || cell.value.trim() === "";
+  // No entry at all reads as "new" — which is what Xcode shows for a string a
+  // language hasn't reached yet.
+  const state = cell?.state ?? (empty ? "new" : "translated");
+  if (state === "translated" && !empty) {
+    return (
+      <span className="state-check" title="Translated">
+        <CheckIcon size={17} />
+      </span>
+    );
+  }
+  if (state === "new" || empty) {
+    return (
+      <span className="state-chip state-new" title="Not translated yet">
+        NEW
+      </span>
+    );
+  }
+  return (
+    <span className={`state-chip state-${state}`} title={stateLabel(state)}>
+      {stateLabel(state).toUpperCase()}
+    </span>
   );
 }
 
@@ -1723,6 +2063,7 @@ function EditableCell({
   onMenu,
   changeKind,
   oldValue,
+  hideStateBadge,
 }: {
   cell: CatalogCell | undefined;
   warn: FormatWarn | null;
@@ -1744,6 +2085,8 @@ function EditableCell({
   onMenu?: (pos: MenuPos) => void;
   changeKind?: ChangeKind;
   oldValue?: string;
+  /** The State column already reports this language — skip the in-cell badge. */
+  hideStateBadge?: boolean;
 }) {
   if (editing) {
     return (
@@ -1805,7 +2148,7 @@ function EditableCell({
           <FormatValue value={cell!.value} />
         )}
       </div>
-      {!sticky && <StateBadge state={cell?.state} />}
+      {!sticky && !hideStateBadge && <StateBadge state={cell?.state} />}
       {warn && <FormatWarning warn={warn} />}
       {onMenu && <Kebab onOpen={onMenu} label="Review state" className="cell-kebab" />}
     </div>

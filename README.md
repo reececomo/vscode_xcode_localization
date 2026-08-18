@@ -31,8 +31,11 @@ Xcode Localization turns `.xcstrings` (and legacy `.strings`) files into a famil
 - **Hybrid columns** - By default the grid shows your source plus one target language. A language picker lets you toggle additional columns on and off, complete with each language's progress; your selection is remembered per file.
 - **Translator notes** - Add, edit, or remove a developer note for any key from the key's context menu (hover a row and click the **⋯** button at the end of the key, or click an existing note to edit it inline), and mark a key as *Don't translate* to exclude it from progress and filters.
   - **Legacy `.strings`:** a key's note lives in the *source-language* file, so notes are editable only when you open that file - e.g. `en.lproj/Localizable.strings`. While viewing a target language the source note is shown **read-only** (open the source file to change it).
-- **Find in code** - From any key's context menu, **Find in code** opens VS Code's search scoped to your Swift / Objective-C files and pre-filled with the key as a quoted string literal - jumping straight to the `Text("…")`, `Button("…")`, or `NSLocalizedString("…", …)` call sites so you can refactor the wording where it's used.
-- **Find unused keys** - The **Scan code** button in the toolbar runs a one-shot pass over your Swift / Objective-C source and flags every key with no quoted-literal reference as *unused*, with an **Unused** filter to list them. It's a hint, not a verdict - keys built by string interpolation or referenced from storyboards/XIBs aren't detected, so verify before deleting. Nothing is indexed in the background and nothing is deleted automatically; re-run the scan whenever you want fresh results.
+- **Find in code** - From any key's context menu, **Find in code** opens VS Code's search scoped to your source files (Swift / Objective-C by default, see `xcodeI18n.sourceFilePatterns`) and pre-filled with the key as a quoted string literal - jumping straight to the `Text("…")`, `Button("…")`, or `NSLocalizedString("…", …)` call sites so you can refactor the wording where it's used.
+- **Find unused keys** - The **Scan code** button in the toolbar runs a one-shot pass over your source files and flags every key with no quoted-literal reference as *unused*, with an **Unused** filter to list them. It's a hint, not a verdict - keys built by string interpolation or referenced from storyboards/XIBs aren't detected, so verify before deleting. Nothing is indexed in the background and nothing is deleted automatically; re-run the scan whenever you want fresh results.
+- **Add and remove strings** - The **+** and **−** buttons at the top left of the grid add a key or delete the selected one. **−** stays greyed out, with the reason in its tooltip, whenever a key isn't yours to delete: it is still referenced in your source code, Xcode manages it automatically (it would be re-extracted on the next build), or it is marked stale but still carries translations. Hand-added keys (`extractionState: "manual"`) can always be deleted, and a delete always re-scans your code first. Set `xcodeI18n.allowRemovingManagedStrings` if you want the automatically-managed rule lifted.
+- **Add and remove languages** - Add a language from the language picker, the toolbar's **⋯** menu, or the Localizations sidebar's context menu. The catalog gets an empty `new` entry for every key, exactly as Xcode writes it. Removing a language is only offered once nothing is translated in it, so a disappearing column can never take work with it. For legacy `.strings`, adding a language creates the `<lang>.lproj` file seeded from the source language; removing one moves it to the trash.
+- **Comment and State columns** - Xcode's two metadata columns, on by default. **Comment** shows each key's developer note in its own column, rendered a step fainter than the translations, and stays editable in place. **State** shows a green checkmark when a string is translated, an orange **NEW** square when it isn't, and a labelled chip for *needs review* and *stale*; it reports on the first target language shown. Toggle either from the **⋯** menu.
 - **Resizable columns** - Drag a column divider to resize, double-click it to reset. Widths are persisted per file.
 - **Built for large catalogs** - Rows are virtualized with measured heights, so catalogs with thousands of entries scroll smoothly while the frozen header and columns stay put.
 - **Theme-aware** - The grid follows your active VS Code color theme and contrast settings.
@@ -66,7 +69,7 @@ An **Xcode Localization** panel in the Activity Bar gives you a workspace-wide o
 - `.xcstrings` catalogs, each showing its language count and overall translation percentage (with a checkmark when fully translated).
 - `.strings` tables grouped by `<lang>.lproj`, expandable to list every language with its name, code, and progress.
 
-Select any entry to open it in the grid editor. Vendor directories such as `Pods/`, `Carthage/`, `DerivedData/`, `build/`, and `node_modules/` are skipped. Use the **Refresh** button in the view's title bar if you reorganize files outside VS Code.
+Select any entry to open it in the grid editor. Right-click a catalog, a table, or any language for **Add Language…**, and a target language for **Remove Language…** — the same rules apply as in the grid, so a language with translations in it can't be removed. Vendor directories such as `Pods/`, `Carthage/`, `DerivedData/`, `build/`, and `node_modules/` are skipped. Use the **Refresh** button in the view's title bar if you reorganize files outside VS Code.
 
 ## Commands
 
@@ -74,6 +77,8 @@ Select any entry to open it in the grid editor. Vendor directories such as `Pods
 | --- | --- |
 | **Xcode Localization: Open as Text** | Reopen the active catalog in VS Code's plain-text JSON editor. |
 | **Xcode Localization: Refresh** | Rescan the workspace and refresh the Localizations view. |
+| **Xcode Localization: Add Language…** | Add a language to the catalog or `.strings` table selected in the Localizations view. |
+| **Xcode Localization: Remove Language…** | Remove the selected target language, once nothing is translated in it. |
 
 ## Settings and customization
 
@@ -90,6 +95,27 @@ All settings live under the `xcodeI18n.*` namespace and can be changed from **Se
   - Default: `true`
   - **Note:** Keyboard activation (**Enter**, **F2**, or type-to-edit) always opens the editor regardless of this setting.
 
+- **`xcodeI18n.showCommentColumn`** - Show the developer note as its own column, the way Xcode does. When off, the note appears under the key instead.
+  - Default: `true`
+
+- **`xcodeI18n.showStateColumn`** - Show the State column (green checkmark / orange **NEW** square / state label). It reports on the first target language shown.
+  - Default: `true`
+
+- **`xcodeI18n.allowRemovingManagedStrings`** - Let the **−** button delete keys Xcode manages automatically. Off by default, because such a key is extracted from your source and returns on the next build.
+  - Default: `false`
+
+- **`xcodeI18n.catalogFilePatterns`** - File name patterns opened as String Catalogs.
+  - Default: `["*.xcstrings"]`
+  - Any pattern beyond the built-in `*.xcstrings` — say `*.strings.json` — is registered in `workbench.editorAssociations` so VS Code routes it here, along with `git:` / `gitlens:` entries that keep diffs on the plain-text editor. Removing a pattern removes the associations again; associations you wrote by hand are left alone.
+
+- **`xcodeI18n.sourceFilePatterns`** - File name patterns treated as source code by **Find in code** and **Find unused keys**.
+  - Default: `["*.swift", "*.m", "*.mm"]`
+  - Add `*.ts`, `*.tsx`, `*.js`, `*.kt` or anything else to use the grid outside an Xcode project. Quoted literals are matched in double, single, and backtick quotes, so JavaScript and TypeScript call sites are found as readily as Swift ones.
+
+- **`xcodeI18n.languageNames`** - Display names for language tags `Intl` doesn't recognise.
+  - Default: `{}`
+  - Example: `{ "en-Pseudo": "English (Pseudo)" }`. Custom tags work everywhere a language appears — the grid header, the language picker, and the sidebar — and are accepted when adding a language.
+
 ## Supported file formats
 
 | | `.xcstrings` (String Catalog) | `.strings` (legacy) |
@@ -103,8 +129,12 @@ All settings live under the `xcodeI18n.*` namespace and can be changed from **Se
 | Orphaned-key detection | - (single file) | ✅ |
 | *Don't translate* flag | ✅ | - |
 | Language picker (hybrid columns) | ✅ | - (one language per file) |
-| Find in code (Swift / Obj-C) | ✅ | ✅ |
+| Find in code (configurable file types) | ✅ | ✅ |
 | Find unused keys (one-shot scan) | ✅ | ✅ |
+| Add / remove strings | ✅ | ✅ |
+| Add / remove languages | ✅ (in the file) | ✅ (`.lproj` files, from the sidebar) |
+| Comment column | ✅ | ✅ (source file) |
+| State column | ✅ | ✅ (derived: filled or empty) |
 
 Source-language cells and plural/device variant cells are read-only in this release.
 
@@ -121,7 +151,7 @@ npm install          # install dependencies (requires Node.js)
 npm run build        # bundle the extension + webview
 ```
 
-Press **F5** in VS Code to launch the Extension Development Host, then open a `.xcstrings` file to try it out. Use `npm run watch` for incremental builds and `npm run typecheck` to type-check without emitting.
+Press **F5** in VS Code to launch the Extension Development Host. The bundled **Run Extension (sample workspace)** configuration builds first and opens `sample/`, a small workspace with a String Catalog covering every state the grid draws, a legacy `.strings` table, and Swift + TypeScript files that reference some of the keys. Use `npm run watch` for incremental builds and `npm run typecheck` to type-check without emitting.
 
 ## Feedback
 

@@ -1,0 +1,7 @@
+/* Title of the settings screen */
+"settings.title" = "Réglages";
+
+/* Toggle label */
+"settings.notifications" = "";
+
+"settings.signOut" = "";

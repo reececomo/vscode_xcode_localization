@@ -51,6 +51,16 @@
         "priority": "default"
       },
       {
+        "viewType": "xcodeI18n.xcstringsEditor",
+        "displayName": "String Catalog",
+        "selector": [
+          {
+            "filenamePattern": "*.strings.json"
+          }
+        ],
+        "priority": "default"
+      },
+      {
         "viewType": "xcodeI18n.stringsEditor",
         "displayName": "Xcode .strings (i18n grid)",
         "selector": [
@@ -64,8 +74,10 @@
     "configurationDefaults": {
       "workbench.editorAssociations": {
         "git:/**/*.xcstrings": "default",
+        "git:/**/*.strings.json": "default",
         "git:/**/*.strings": "default",
         "gitlens:/**/*.xcstrings": "default",
+        "gitlens:/**/*.strings.json": "default",
         "gitlens:/**/*.strings": "default"
       }
     },
@@ -81,6 +93,18 @@
         "title": "Refresh",
         "category": "Xcode Localization",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "xcodeI18n.addLanguage",
+        "title": "Add Language…",
+        "category": "Xcode Localization",
+        "icon": "$(add)"
+      },
+      {
+        "command": "xcodeI18n.removeLanguage",
+        "title": "Remove Language…",
+        "category": "Xcode Localization",
+        "icon": "$(trash)"
       }
     ],
     "viewsContainers": {
@@ -120,6 +144,23 @@
           "when": "view == xcodeI18n.localizations",
           "group": "navigation"
         }
+      ],
+      "view/item/context": [
+        {
+          "command": "xcodeI18n.addLanguage",
+          "when": "view == xcodeI18n.localizations && viewItem =~ /^xcodeI18n\\.(catalog|table|catalogLanguage|language)/",
+          "group": "inline@1"
+        },
+        {
+          "command": "xcodeI18n.addLanguage",
+          "when": "view == xcodeI18n.localizations && viewItem =~ /^xcodeI18n\\.(catalog|table|catalogLanguage|language)/",
+          "group": "1_manage@1"
+        },
+        {
+          "command": "xcodeI18n.removeLanguage",
+          "when": "view == xcodeI18n.localizations && viewItem =~ /\\.removable$/",
+          "group": "1_manage@2"
+        }
       ]
     },
     "configuration": {
@@ -144,6 +185,51 @@
           "type": "boolean",
           "default": true,
           "description": "Require a double-click to open a cell for editing; a single click only selects it. Uncheck to open the editor with a single click."
+        },
+        "xcodeI18n.showCommentColumn": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the Comment column — the developer note for each key, in its own column the way Xcode shows it. When off, the note appears under the key instead."
+        },
+        "xcodeI18n.showStateColumn": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the State column: a green check when a string is translated, an orange NEW square when it isn't, and a label for every other state. It reports on the first target language shown."
+        },
+        "xcodeI18n.allowRemovingManagedStrings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow deleting keys that Xcode manages automatically. Off by default: such a key is extracted from your source code, so deleting it here only postpones it until the next build. Keys added by hand can always be deleted."
+        },
+        "xcodeI18n.catalogFilePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "*.xcstrings"
+          ],
+          "markdownDescription": "File name patterns opened as String Catalogs, e.g. `*.strings.json`. Patterns other than the built-in `*.xcstrings` are registered in `#workbench.editorAssociations#` so VS Code routes them to this editor; removing a pattern here removes that association again."
+        },
+        "xcodeI18n.sourceFilePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "*.swift",
+            "*.m",
+            "*.mm"
+          ],
+          "markdownDescription": "File name patterns counted as source code by **Find in code** and **Find unused keys**. Add `*.ts`, `*.tsx`, `*.js` and the like to use this extension outside an Xcode project — quoted literals are matched in double, single and backtick quotes."
+        },
+        "xcodeI18n.languageNames": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "markdownDescription": "Display names for language tags VS Code doesn't recognise, e.g. `{ \"en-Pseudo\": \"English (Pseudo)\" }`. Everything else keeps its standard name."
         }
       }
     }

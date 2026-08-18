@@ -85,12 +85,15 @@ export function MenuItem({
   icon,
   checked,
   disabled,
+  title,
   onSelect,
 }: {
   label: string;
   icon?: ReactNode;
   checked?: boolean;
   disabled?: boolean;
+  /** Hover text — used to explain why a disabled item is disabled. */
+  title?: string;
   onSelect(): void;
 }) {
   return (
@@ -100,6 +103,7 @@ export function MenuItem({
       aria-checked={!!checked}
       className="ctx-item"
       disabled={disabled}
+      title={title}
       onClick={() => onSelect()}
     >
       <span className="ctx-icon">

@@ -1,0 +1,106 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "%lld items in cart" : {
+      "comment" : "Cart badge. Keep the number first.",
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld item in cart"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld items in cart"
+                }
+              }
+            }
+          }
+        },
+        "fr" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld article dans le panier"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "new",
+                  "value" : ""
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "Cancel" : {
+      "comment" : "Dismisses the sheet without saving.",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Annuler"
+          }
+        }
+      }
+    },
+    "Continue" : {
+      "comment" : "Primary button on the onboarding screen.",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Continuer"
+          }
+        }
+      }
+    },
+    "Hand-written string" : {
+      "comment" : "Added in the editor, so it is yours to delete.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : ""
+          }
+        }
+      }
+    },
+    "Removed from the code a while ago" : {
+      "extractionState" : "stale"
+    },
+    "Stale but already translated" : {
+      "extractionState" : "stale",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Périmé mais déjà traduit"
+          }
+        }
+      }
+    },
+    "Welcome, %@!" : {
+      "comment" : "Greeting on the home screen. %@ is the member's first name.",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bienvenue !"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

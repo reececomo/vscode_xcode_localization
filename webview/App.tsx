@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type {
   HostToWebview,
@@ -6,8 +6,10 @@ import type {
   Settings,
   Capabilities,
 } from "../src/shared/protocol";
-import type { Catalog } from "../src/shared/xcstrings";
+import type { Catalog, CatalogEntry } from "../src/shared/xcstrings";
 import { parseCatalog } from "../src/shared/xcstrings";
+import { keyRemovability, languageIsEmpty } from "../src/shared/manage";
+import { setLanguageNameOverrides, langName } from "../src/shared/langName";
 import { diffSpecifiers } from "../src/shared/format";
 import { allLanguageProgress } from "../src/shared/progress";
 import {
@@ -31,6 +33,9 @@ import {
   LoadingIcon,
   ScanIcon,
   MoreIcon,
+  PlusIcon,
+  MinusIcon,
+  TrashIcon,
 } from "./icons";
 import { MenuItem, MenuSeparator } from "./Menu";
 import { gridStyles } from "./gridStyles";
@@ -86,6 +91,20 @@ function postSetState(
 /** Persist a display option to the user settings (the toolbar toggles). */
 function postSetSettings(settings: Partial<Settings>) {
   post({ type: "setSettings", settings });
+}
+
+/** Add a string / language — the host prompts, validates and writes. */
+function postAddString() {
+  post({ type: "addString" });
+}
+function postRemoveStrings(keys: string[]) {
+  post({ type: "removeStrings", keys });
+}
+function postAddLanguage() {
+  post({ type: "addLanguage" });
+}
+function postRemoveLanguage(lang: string) {
+  post({ type: "removeLanguage", lang });
 }
 
 /** Row spacing: "comfortable" (default) or "compact" (tighter, more rows). */
@@ -253,11 +272,19 @@ function SearchBox({
 function ToolbarMenu({
   viewMode,
   density,
+  showComment,
+  showState,
   scanning,
   usage,
   onToggleView,
   onToggleDensity,
+  onToggleComment,
+  onToggleState,
   onScan,
+  canManageLanguages,
+  removableLanguages,
+  onAddLanguage,
+  onRemoveLanguage,
   sourceLanguage,
   keyCount,
   langCount,
@@ -265,12 +292,22 @@ function ToolbarMenu({
 }: {
   viewMode: ViewMode;
   density: Density;
+  showComment: boolean;
+  showState: boolean;
   scanning: boolean;
   /** null until the first scan → drives the action's label. */
   usage: Record<string, number> | null;
   onToggleView(): void;
   onToggleDensity(): void;
+  onToggleComment(): void;
+  onToggleState(): void;
   onScan(): void;
+  /** Whether languages can be managed from here (`.xcstrings` only). */
+  canManageLanguages: boolean;
+  /** Target languages with nothing translated — the ones safe to remove. */
+  removableLanguages: string[];
+  onAddLanguage(): void;
+  onRemoveLanguage(lang: string): void;
   sourceLanguage: string;
   keyCount: number;
   langCount: number;
@@ -331,6 +368,50 @@ function ToolbarMenu({
             checked={density === "compact"}
             onSelect={onToggleDensity}
           />
+          <MenuItem
+            label="Show comment column"
+            checked={showComment}
+            onSelect={onToggleComment}
+          />
+          <MenuItem
+            label="Show state column"
+            checked={showState}
+            onSelect={onToggleState}
+          />
+          {canManageLanguages && (
+            <>
+              <MenuSeparator />
+              <MenuItem
+                label="Add language…"
+                icon={<PlusIcon size={13} />}
+                onSelect={() => {
+                  onAddLanguage();
+                  setOpen(false);
+                }}
+              />
+              {removableLanguages.length === 0 ? (
+                <MenuItem
+                  label="Remove language"
+                  icon={<TrashIcon size={13} />}
+                  disabled
+                  title="Only a language with nothing translated in it can be removed."
+                  onSelect={() => {}}
+                />
+              ) : (
+                removableLanguages.map((lang) => (
+                  <MenuItem
+                    key={lang}
+                    label={`Remove ${langName(lang)} (${lang})…`}
+                    icon={<TrashIcon size={13} />}
+                    onSelect={() => {
+                      onRemoveLanguage(lang);
+                      setOpen(false);
+                    }}
+                  />
+                ))
+              )}
+            </>
+          )}
           <MenuSeparator />
           <MenuItem
             label={scanLabel}
@@ -393,6 +474,11 @@ export function App() {
   const [density, setDensity] = useState<Density>("comfortable");
   const [viewMode, setViewMode] = useState<ViewMode>("merged");
   const [doubleClickToEdit, setDoubleClickToEdit] = useState(true);
+  // Xcode's two metadata columns, and the escape hatch that lets an
+  // automatically managed key be deleted anyway.
+  const [showComment, setShowComment] = useState(true);
+  const [showState, setShowState] = useState(true);
+  const [allowManaged, setAllowManaged] = useState(false);
   // For .strings the host ships a prebuilt catalog (it aggregates the opened
   // file + its source sibling); for .xcstrings the webview parses `text` itself.
   const [model, setModel] = useState<Catalog | null>(null);
@@ -405,6 +491,9 @@ export function App() {
     diff: true,
     chooseColumns: true,
     orphanKeys: false,
+    manageKeys: true,
+    manageLanguages: true,
+    tracksExtractionState: true,
     keyAsSource: true,
   });
   const [filter, setFilter] = useState<UiFilter>("all");
@@ -419,6 +508,11 @@ export function App() {
   const [usage, setUsage] = useState<Record<string, number> | null>(null);
   const [usageFiles, setUsageFiles] = useState<number>(0);
   const [scanning, setScanning] = useState(false);
+  // The key under the grid's cursor — what the toolbar's "−" acts on.
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // A key to jump to after it is added. The counter makes a repeat reveal of the
+  // same key a distinct instruction.
+  const [reveal, setReveal] = useState<{ key: string; seq: number } | null>(null);
   // Latest source language, read inside the (mount-only) message handler so it
   // can tell a source pick from a target pick without re-subscribing.
   const sourceLangRef = useRef("");
@@ -470,6 +564,10 @@ export function App() {
         setDensity(msg.settings.displayMode);
         setViewMode(msg.settings.mergeKeySource ? "merged" : "split");
         setDoubleClickToEdit(msg.settings.doubleClickToEdit);
+        setShowComment(msg.settings.showCommentColumn);
+        setShowState(msg.settings.showStateColumn);
+        setAllowManaged(msg.settings.allowRemovingManagedStrings);
+        setLanguageNameOverrides(msg.settings.languageNames ?? {});
       } else if (msg.type === "externalChange") {
         setExternalChange(true);
       } else if (msg.type === "usage") {
@@ -481,6 +579,13 @@ export function App() {
         setWidths(msg.widths);
         setInherited(msg.lastTargets);
         setHydrated(true);
+      } else if (msg.type === "revealKey") {
+        // A brand-new key would be hidden by an active filter or search, so
+        // clear both — the point of revealing it is to type into it.
+        setFilter("all");
+        setQuery("");
+        setSelectedKey(msg.key);
+        setReveal((prev) => ({ key: msg.key, seq: (prev?.seq ?? 0) + 1 }));
       } else if (msg.type === "selectLanguage") {
         // Sidebar picked one language → focus it. A target shows Key/source +
         // that column; the source has no separate target column, so focusing it
@@ -539,6 +644,41 @@ export function App() {
       return next;
     });
   }
+
+  // Removability rules, shared with the host (which re-checks before writing).
+  // Only a scan that actually read files can answer "is it used in code?" — with
+  // none, that rule simply doesn't apply and the host scans at delete time.
+  const canRemoveKey = useCallback(
+    (entry: CatalogEntry) =>
+      keyRemovability(entry, {
+        usage: usageReady ? usage : null,
+        tracksExtractionState: caps.tracksExtractionState,
+        allowManaged,
+      }),
+    [usage, usageReady, caps.tracksExtractionState, allowManaged]
+  );
+
+  const selectedEntry = useMemo(
+    () =>
+      selectedKey === null
+        ? null
+        : catalog.entries.find((e) => e.key === selectedKey) ?? null,
+    [catalog, selectedKey]
+  );
+  const removal = selectedEntry ? canRemoveKey(selectedEntry) : null;
+
+  // A language can only go if nothing is translated in it.
+  const isLanguageEmpty = useCallback(
+    (lang: string) => languageIsEmpty(catalog, lang),
+    [catalog]
+  );
+  const removableLanguages = useMemo(
+    () => nonSource.filter((lang) => languageIsEmpty(catalog, lang)),
+    [catalog, nonSource]
+  );
+  // The State column reports on one language: the first target shown, or the
+  // source when the grid is showing no targets at all.
+  const stateLang = targets[0] ?? catalog.sourceLanguage;
 
   const keyCount = catalog.entries.length;
   const hasData = keyCount > 0 && !catalog.error;
@@ -670,6 +810,39 @@ export function App() {
 
       {hasData && (
         <div className="toolbar">
+          {caps.manageKeys && (
+            <div className="row-actions" role="group" aria-label="Add or remove strings">
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Add a string"
+                title="Add a string"
+                onClick={postAddString}
+              >
+                <PlusIcon size={14} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Remove the selected string"
+                disabled={!removal?.canRemove}
+                title={
+                  !selectedEntry
+                    ? "Select a string to remove it"
+                    : removal?.canRemove
+                    ? `Remove "${selectedEntry.key}"`
+                    : `Can't remove "${selectedEntry.key}" — ${removal?.reason}`
+                }
+                onClick={() => {
+                  if (selectedEntry && removal?.canRemove) {
+                    postRemoveStrings([selectedEntry.key]);
+                  }
+                }}
+              >
+                <MinusIcon size={14} />
+              </button>
+            </div>
+          )}
           <FilterBar
             value={effectiveFilter}
             counts={counts}
@@ -685,12 +858,18 @@ export function App() {
                 selected={targets}
                 progress={progress}
                 onChange={updateTargets}
+                canManage={caps.manageLanguages}
+                onAddLanguage={postAddLanguage}
+                onRemoveLanguage={postRemoveLanguage}
+                isEmpty={isLanguageEmpty}
               />
             )}
           </SearchBox>
           <ToolbarMenu
             viewMode={viewMode}
             density={density}
+            showComment={showComment}
+            showState={showState}
             scanning={scanning}
             usage={usage}
             onToggleView={() => {
@@ -703,7 +882,21 @@ export function App() {
               setDensity(next); // optimistic; the setting echoes back to confirm
               postSetSettings({ displayMode: next });
             }}
+            onToggleComment={() => {
+              const next = !showComment;
+              setShowComment(next); // optimistic; the setting echoes back
+              postSetSettings({ showCommentColumn: next });
+            }}
+            onToggleState={() => {
+              const next = !showState;
+              setShowState(next); // optimistic; the setting echoes back
+              postSetSettings({ showStateColumn: next });
+            }}
             onScan={runScan}
+            canManageLanguages={caps.manageLanguages}
+            removableLanguages={removableLanguages}
+            onAddLanguage={postAddLanguage}
+            onRemoveLanguage={postRemoveLanguage}
             sourceLanguage={catalog.sourceLanguage}
             keyCount={keyCount}
             langCount={catalog.languages.length}
@@ -751,6 +944,9 @@ export function App() {
           merged={viewMode === "merged"}
           doubleClickToEdit={doubleClickToEdit}
           caps={caps}
+          showComment={showComment}
+          showState={showState}
+          stateLang={stateLang}
           onResize={setColWidth}
           onResetWidth={resetColWidth}
           onSetValue={postSetValue}
@@ -759,6 +955,10 @@ export function App() {
           onSetState={postSetState}
           onFindInCode={postFindInCode}
           usage={usageReady ? usage : null}
+          onSelectionChange={setSelectedKey}
+          canRemoveKey={canRemoveKey}
+          onRemoveKey={(key) => postRemoveStrings([key])}
+          reveal={reveal}
         />
       )}
     </div>

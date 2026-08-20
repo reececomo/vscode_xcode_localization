@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type {
   HostToWebview,
@@ -6,9 +6,11 @@ import type {
   Settings,
   Capabilities,
 } from "../src/shared/protocol";
-import type { Catalog } from "../src/shared/xcstrings";
+import type { Catalog, CatalogEntry } from "../src/shared/xcstrings";
 import { parseCatalog } from "../src/shared/xcstrings";
-import { diffSpecifiers } from "../src/shared/format";
+import { keyRemovability, languageIsEmpty } from "../src/shared/manage";
+import { setLanguageNameOverrides, langName } from "../src/shared/langName";
+import { checkValue } from "../src/shared/format";
 import { allLanguageProgress } from "../src/shared/progress";
 import {
   filterEntries,
@@ -31,6 +33,10 @@ import {
   LoadingIcon,
   ScanIcon,
   MoreIcon,
+  PlusIcon,
+  MinusIcon,
+  TrashIcon,
+  SyncIcon,
 } from "./icons";
 import { MenuItem, MenuSeparator } from "./Menu";
 import { gridStyles } from "./gridStyles";
@@ -88,6 +94,25 @@ function postSetSettings(settings: Partial<Settings>) {
   post({ type: "setSettings", settings });
 }
 
+/** Add a string / language — the host prompts, validates and writes. */
+function postAddString() {
+  post({ type: "addString" });
+}
+function postRemoveStrings(keys: string[]) {
+  post({ type: "removeStrings", keys });
+}
+/** Sweep the source: extract missing keys, re-file stale ones, refresh usage. */
+function postSyncCode() {
+  post({ type: "syncCode" });
+}
+
+function postAddLanguage() {
+  post({ type: "addLanguage" });
+}
+function postRemoveLanguage(lang: string) {
+  post({ type: "removeLanguage", lang });
+}
+
 /** Row spacing: "comfortable" (default) or "compact" (tighter, more rows). */
 type Density = "comfortable" | "compact";
 
@@ -128,7 +153,11 @@ function defaultTargets(catalog: Catalog): string[] {
  * format specifiers diverge from the source. When `keyAsSource` is false
  * (.strings) the key is NOT used as a stand-in source, so a file with no real
  * source value (e.g. the source-language file itself) yields no warnings. */
-function countFormatWarnings(catalog: Catalog, keyAsSource: boolean): number {
+function countFormatWarnings(
+  catalog: Catalog,
+  keyAsSource: boolean,
+  icuEnabled: boolean
+): number {
   const src = catalog.sourceLanguage;
   let n = 0;
   for (const entry of catalog.entries) {
@@ -136,12 +165,9 @@ function countFormatWarnings(catalog: Catalog, keyAsSource: boolean): number {
       const sourceValue = keyAsSource
         ? row.cells[src]?.value ?? entry.key
         : row.cells[src]?.value;
-      if (sourceValue === undefined) continue;
       for (const lang of Object.keys(row.cells)) {
         if (lang === src) continue;
-        const value = row.cells[lang]?.value;
-        if (!value || value.trim() === "") continue;
-        if (!diffSpecifiers(sourceValue, value).ok) n++;
+        if (checkValue(sourceValue, row.cells[lang]?.value, icuEnabled)) n++;
       }
     }
   }
@@ -253,11 +279,21 @@ function SearchBox({
 function ToolbarMenu({
   viewMode,
   density,
+  showComment,
+  showState,
+  icuEnabled,
   scanning,
   usage,
   onToggleView,
   onToggleDensity,
+  onToggleComment,
+  onToggleState,
+  onToggleIcu,
   onScan,
+  canManageLanguages,
+  removableLanguages,
+  onAddLanguage,
+  onRemoveLanguage,
   sourceLanguage,
   keyCount,
   langCount,
@@ -265,12 +301,24 @@ function ToolbarMenu({
 }: {
   viewMode: ViewMode;
   density: Density;
+  showComment: boolean;
+  showState: boolean;
+  icuEnabled: boolean;
   scanning: boolean;
   /** null until the first scan → drives the action's label. */
   usage: Record<string, number> | null;
   onToggleView(): void;
   onToggleDensity(): void;
+  onToggleComment(): void;
+  onToggleState(): void;
+  onToggleIcu(): void;
   onScan(): void;
+  /** Whether languages can be managed from here (`.xcstrings` only). */
+  canManageLanguages: boolean;
+  /** Target languages with nothing translated — the ones safe to remove. */
+  removableLanguages: string[];
+  onAddLanguage(): void;
+  onRemoveLanguage(lang: string): void;
   sourceLanguage: string;
   keyCount: number;
   langCount: number;
@@ -331,6 +379,50 @@ function ToolbarMenu({
             checked={density === "compact"}
             onSelect={onToggleDensity}
           />
+          <MenuItem
+            label="Show comment column"
+            checked={showComment}
+            onSelect={onToggleComment}
+          />
+          <MenuItem
+            label="Show state column"
+            checked={showState}
+            onSelect={onToggleState}
+          />
+          {canManageLanguages && (
+            <>
+              <MenuSeparator />
+              <MenuItem
+                label="Add language…"
+                icon={<PlusIcon size={13} />}
+                onSelect={() => {
+                  onAddLanguage();
+                  setOpen(false);
+                }}
+              />
+              {removableLanguages.length === 0 ? (
+                <MenuItem
+                  label="Remove language"
+                  icon={<TrashIcon size={13} />}
+                  disabled
+                  title="Only a language with nothing translated in it can be removed."
+                  onSelect={() => {}}
+                />
+              ) : (
+                removableLanguages.map((lang) => (
+                  <MenuItem
+                    key={lang}
+                    label={`Remove ${langName(lang)} (${lang})…`}
+                    icon={<TrashIcon size={13} />}
+                    onSelect={() => {
+                      onRemoveLanguage(lang);
+                      setOpen(false);
+                    }}
+                  />
+                ))
+              )}
+            </>
+          )}
           <MenuSeparator />
           <MenuItem
             label={scanLabel}
@@ -393,6 +485,12 @@ export function App() {
   const [density, setDensity] = useState<Density>("comfortable");
   const [viewMode, setViewMode] = useState<ViewMode>("merged");
   const [doubleClickToEdit, setDoubleClickToEdit] = useState(true);
+  // Xcode's two metadata columns, and the escape hatch that lets an
+  // automatically managed key be deleted anyway.
+  const [showComment, setShowComment] = useState(true);
+  const [showState, setShowState] = useState(true);
+  const [allowManaged, setAllowManaged] = useState(false);
+  const [icuEnabled, setIcuEnabled] = useState(true);
   // For .strings the host ships a prebuilt catalog (it aggregates the opened
   // file + its source sibling); for .xcstrings the webview parses `text` itself.
   const [model, setModel] = useState<Catalog | null>(null);
@@ -405,6 +503,9 @@ export function App() {
     diff: true,
     chooseColumns: true,
     orphanKeys: false,
+    manageKeys: true,
+    manageLanguages: true,
+    tracksExtractionState: true,
     keyAsSource: true,
   });
   const [filter, setFilter] = useState<UiFilter>("all");
@@ -419,6 +520,13 @@ export function App() {
   const [usage, setUsage] = useState<Record<string, number> | null>(null);
   const [usageFiles, setUsageFiles] = useState<number>(0);
   const [scanning, setScanning] = useState(false);
+  // A code sweep is running (the toolbar's sync button).
+  const [syncing, setSyncing] = useState(false);
+  // The key under the grid's cursor — what the toolbar's "−" acts on.
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // A key to jump to after it is added. The counter makes a repeat reveal of the
+  // same key a distinct instruction.
+  const [reveal, setReveal] = useState<{ key: string; seq: number } | null>(null);
   // Latest source language, read inside the (mount-only) message handler so it
   // can tell a source pick from a target pick without re-subscribing.
   const sourceLangRef = useRef("");
@@ -470,17 +578,31 @@ export function App() {
         setDensity(msg.settings.displayMode);
         setViewMode(msg.settings.mergeKeySource ? "merged" : "split");
         setDoubleClickToEdit(msg.settings.doubleClickToEdit);
+        setShowComment(msg.settings.showCommentColumn);
+        setShowState(msg.settings.showStateColumn);
+        setAllowManaged(msg.settings.allowRemovingManagedStrings);
+        setIcuEnabled(msg.settings.validateIcuMessages);
+        setLanguageNameOverrides(msg.settings.languageNames ?? {});
       } else if (msg.type === "externalChange") {
         setExternalChange(true);
       } else if (msg.type === "usage") {
         setUsage(msg.counts);
         setUsageFiles(msg.filesScanned);
         setScanning(false);
+      } else if (msg.type === "syncDone") {
+        setSyncing(false);
       } else if (msg.type === "layout") {
         setChosen(msg.targets);
         setWidths(msg.widths);
         setInherited(msg.lastTargets);
         setHydrated(true);
+      } else if (msg.type === "revealKey") {
+        // A brand-new key would be hidden by an active filter or search, so
+        // clear both — the point of revealing it is to type into it.
+        setFilter("all");
+        setQuery("");
+        setSelectedKey(msg.key);
+        setReveal((prev) => ({ key: msg.key, seq: (prev?.seq ?? 0) + 1 }));
       } else if (msg.type === "selectLanguage") {
         // Sidebar picked one language → focus it. A target shows Key/source +
         // that column; the source has no separate target column, so focusing it
@@ -540,12 +662,48 @@ export function App() {
     });
   }
 
+  // Removability rules, shared with the host (which re-checks before writing).
+  // Only a scan that actually read files can answer "is it used in code?" — with
+  // none, that rule simply doesn't apply and the host scans at delete time.
+  const canRemoveKey = useCallback(
+    (entry: CatalogEntry) =>
+      keyRemovability(entry, {
+        usage: usageReady ? usage : null,
+        tracksExtractionState: caps.tracksExtractionState,
+        allowManaged,
+      }),
+    [usage, usageReady, caps.tracksExtractionState, allowManaged]
+  );
+
+  const selectedEntry = useMemo(
+    () =>
+      selectedKey === null
+        ? null
+        : catalog.entries.find((e) => e.key === selectedKey) ?? null,
+    [catalog, selectedKey]
+  );
+  const removal = selectedEntry ? canRemoveKey(selectedEntry) : null;
+
+  // A language can only go if nothing is translated in it.
+  const isLanguageEmpty = useCallback(
+    (lang: string) => languageIsEmpty(catalog, lang),
+    [catalog]
+  );
+  const removableLanguages = useMemo(
+    () => nonSource.filter((lang) => languageIsEmpty(catalog, lang)),
+    [catalog, nonSource]
+  );
+  // The State column reports on one language: the first target shown, or the
+  // source when the grid is showing no targets at all.
+  const stateLang = targets[0] ?? catalog.sourceLanguage;
+
   const keyCount = catalog.entries.length;
   const hasData = keyCount > 0 && !catalog.error;
 
   const warnCount = useMemo(
-    () => (hasData ? countFormatWarnings(catalog, caps.keyAsSource) : 0),
-    [catalog, hasData, caps.keyAsSource]
+    () =>
+      hasData ? countFormatWarnings(catalog, caps.keyAsSource, icuEnabled) : 0,
+    [catalog, hasData, caps.keyAsSource, icuEnabled]
   );
   const progress = useMemo(() => allLanguageProgress(catalog), [catalog]);
   // Search first, then per-filter counts + the active filter share that result
@@ -594,7 +752,13 @@ export function App() {
   }, [catalog, baseline, targets]);
 
   const counts = useMemo<Record<UiFilter, number>>(() => {
-    const base = filterCounts(searched, catalog.sourceLanguage, targets, caps.keyAsSource);
+    const base = filterCounts(
+      searched,
+      catalog.sourceLanguage,
+      targets,
+      caps.keyAsSource,
+      icuEnabled
+    );
     const changed = diffEnabled
       ? searched.reduce((n, e) => n + (changedKeySet.has(e.key) ? 1 : 0), 0)
       : 0;
@@ -602,7 +766,7 @@ export function App() {
       ? searched.reduce((n, e) => n + (usage![e.key] === 0 ? 1 : 0), 0)
       : 0;
     return { ...base, changed, unused };
-  }, [searched, catalog.sourceLanguage, targets, changedKeySet, diffEnabled, caps.keyAsSource, usage, usageReady]);
+  }, [searched, catalog.sourceLanguage, targets, changedKeySet, diffEnabled, caps.keyAsSource, usage, usageReady, icuEnabled]);
 
   // Conditional tabs disappear when unavailable → fall back to All.
   const effectiveFilter: UiFilter =
@@ -633,9 +797,10 @@ export function App() {
       catalog.sourceLanguage,
       targets,
       effectiveFilter,
-      caps.keyAsSource
+      caps.keyAsSource,
+      icuEnabled
     );
-  }, [searched, catalog.sourceLanguage, targets, effectiveFilter, changedKeySet, caps.keyAsSource, usage]);
+  }, [searched, catalog.sourceLanguage, targets, effectiveFilter, changedKeySet, caps.keyAsSource, usage, icuEnabled]);
 
   return (
     <div className={"app" + (density === "compact" ? " density-compact" : "")}>
@@ -670,6 +835,39 @@ export function App() {
 
       {hasData && (
         <div className="toolbar">
+          {caps.manageKeys && (
+            <div className="row-actions" role="group" aria-label="Add or remove strings">
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Add a string"
+                title="Add a string"
+                onClick={postAddString}
+              >
+                <PlusIcon size={14} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Remove the selected string"
+                disabled={!removal?.canRemove}
+                title={
+                  !selectedEntry
+                    ? "Select a string to remove it"
+                    : removal?.canRemove
+                    ? `Remove "${selectedEntry.key}"`
+                    : `Can't remove "${selectedEntry.key}" — ${removal?.reason}`
+                }
+                onClick={() => {
+                  if (selectedEntry && removal?.canRemove) {
+                    postRemoveStrings([selectedEntry.key]);
+                  }
+                }}
+              >
+                <MinusIcon size={14} />
+              </button>
+            </div>
+          )}
           <FilterBar
             value={effectiveFilter}
             counts={counts}
@@ -685,12 +883,42 @@ export function App() {
                 selected={targets}
                 progress={progress}
                 onChange={updateTargets}
+                canManage={caps.manageLanguages}
+                onAddLanguage={postAddLanguage}
+                onRemoveLanguage={postRemoveLanguage}
+                isEmpty={isLanguageEmpty}
               />
             )}
           </SearchBox>
+          {caps.manageKeys && (
+            <button
+              type="button"
+              className={"icon-btn" + (syncing ? " active" : "")}
+              aria-label="Sync with code"
+              disabled={syncing}
+              title={
+                syncing
+                  ? "Scanning your source…"
+                  : "Sync with code — extract strings your code uses, flag keys it no longer references, and refresh usage counts"
+              }
+              onClick={() => {
+                setSyncing(true);
+                postSyncCode();
+              }}
+            >
+              {syncing ? (
+                <LoadingIcon size={14} className="spin" />
+              ) : (
+                <SyncIcon size={14} />
+              )}
+            </button>
+          )}
           <ToolbarMenu
             viewMode={viewMode}
             density={density}
+            showComment={showComment}
+            showState={showState}
+            icuEnabled={icuEnabled}
             scanning={scanning}
             usage={usage}
             onToggleView={() => {
@@ -703,7 +931,26 @@ export function App() {
               setDensity(next); // optimistic; the setting echoes back to confirm
               postSetSettings({ displayMode: next });
             }}
+            onToggleComment={() => {
+              const next = !showComment;
+              setShowComment(next); // optimistic; the setting echoes back
+              postSetSettings({ showCommentColumn: next });
+            }}
+            onToggleState={() => {
+              const next = !showState;
+              setShowState(next); // optimistic; the setting echoes back
+              postSetSettings({ showStateColumn: next });
+            }}
+            onToggleIcu={() => {
+              const next = !icuEnabled;
+              setIcuEnabled(next); // optimistic; the setting echoes back
+              postSetSettings({ validateIcuMessages: next });
+            }}
             onScan={runScan}
+            canManageLanguages={caps.manageLanguages}
+            removableLanguages={removableLanguages}
+            onAddLanguage={postAddLanguage}
+            onRemoveLanguage={postRemoveLanguage}
             sourceLanguage={catalog.sourceLanguage}
             keyCount={keyCount}
             langCount={catalog.languages.length}
@@ -751,6 +998,10 @@ export function App() {
           merged={viewMode === "merged"}
           doubleClickToEdit={doubleClickToEdit}
           caps={caps}
+          showComment={showComment}
+          showState={showState}
+          stateLang={stateLang}
+          icuEnabled={icuEnabled}
           onResize={setColWidth}
           onResetWidth={resetColWidth}
           onSetValue={postSetValue}
@@ -759,6 +1010,10 @@ export function App() {
           onSetState={postSetState}
           onFindInCode={postFindInCode}
           usage={usageReady ? usage : null}
+          onSelectionChange={setSelectedKey}
+          canRemoveKey={canRemoveKey}
+          onRemoveKey={(key) => postRemoveStrings([key])}
+          reveal={reveal}
         />
       )}
     </div>

@@ -114,3 +114,51 @@ function formatStringsComment(comment: string, eol: string): string {
   const safe = comment.replace(/\*\//g, "* /").replace(/\r\n|\n/g, eol);
   return `/* ${safe} */`;
 }
+
+/**
+ * Append `"key" = "";` for a new key. Legacy `.strings` has no key table to
+ * insert into, so a new key goes at the end of the file — same reasoning as the
+ * String Catalog: one added block, nothing else touched.
+ */
+export function addStringEntry(
+  text: string,
+  key: string,
+  ctx: EditContext
+): EditResult {
+  const file = parseStrings(text);
+  if (file.entries.some((e) => e.key === key)) {
+    return { edits: [], reason: `the key "${key}" already exists` };
+  }
+
+  const line = `${escapeStringsValue(key)} = ${escapeStringsValue("")};`;
+  const eol = ctx.eol;
+  const newText = file.endsWithNewline ? `${line}${eol}` : `${eol}${line}${eol}`;
+  return { edits: [{ offset: text.length, length: 0, newText }] };
+}
+
+/**
+ * Delete whole entries — the `"key" = "value";` statement plus its attached
+ * `/* comment *​/` and the line it sat on, so no blank line is left behind.
+ */
+export function removeStringEntries(text: string, keys: string[]): EditResult {
+  const file = parseStrings(text);
+  const wanted = new Set(keys);
+  const edits: TextReplace[] = [];
+
+  for (const e of file.entries) {
+    if (!wanted.has(e.key)) continue;
+    const start = e.commentStart ?? e.keyStart;
+    const semi = text.indexOf(";", e.valueStart + e.valueLength);
+    let end = semi === -1 ? e.valueStart + e.valueLength : semi + 1;
+    // Swallow the rest of the line so the statement doesn't leave an empty one.
+    while (end < text.length && (text[end] === " " || text[end] === "\t")) end++;
+    if (text[end] === "\r") end++;
+    if (text[end] === "\n") end++;
+    edits.push({ offset: start, length: end - start, newText: "" });
+  }
+
+  if (edits.length === 0) {
+    return { edits: [], reason: "no such key in this file" };
+  }
+  return { edits };
+}

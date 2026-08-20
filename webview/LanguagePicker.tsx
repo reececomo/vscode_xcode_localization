@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { LangProgress } from "../src/shared/progress";
-import { ChevronDownIcon } from "./icons";
+import { ChevronDownIcon, PlusIcon, TrashIcon } from "./icons";
 import { langName } from "../src/shared/langName";
 
 interface LanguagePickerProps {
@@ -13,6 +13,14 @@ interface LanguagePickerProps {
   /** Translation progress per language (for the inline bars). */
   progress: Record<string, LangProgress>;
   onChange(next: string[]): void;
+  /** Whether this file's languages can be added to / removed from here. */
+  canManage: boolean;
+  /** Ask the host to add a language (it prompts for the tag). */
+  onAddLanguage(): void;
+  /** Ask the host to remove a language (it confirms). */
+  onRemoveLanguage(lang: string): void;
+  /** True when nothing is translated in `lang`, so removing it loses no work. */
+  isEmpty(lang: string): boolean;
 }
 
 /** Compact chip label for the current targets: e.g. "fr", "fr +1", or "none". */
@@ -34,6 +42,10 @@ export function LanguagePicker({
   selected,
   progress,
   onChange,
+  canManage,
+  onAddLanguage,
+  onRemoveLanguage,
+  isEmpty,
 }: LanguagePickerProps) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -149,11 +161,62 @@ export function LanguagePicker({
                     <span className="prog-pct">{p.percent}%</span>
                   </>
                 )}
+                {canManage && <RemoveLanguage lang={lang} empty={isEmpty(lang)} onRemove={onRemoveLanguage} />}
               </label>
             );
           })}
+
+          {canManage && (
+            <button
+              type="button"
+              className="pop-add"
+              onClick={() => {
+                setOpen(false);
+                onAddLanguage();
+              }}
+            >
+              <PlusIcon size={12} />
+              <span>Add language…</span>
+            </button>
+          )}
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Per-language remove button. A language with translations in it stays disabled
+ * rather than hidden: the point is to say *why* it can't go, not to pretend the
+ * action doesn't exist.
+ */
+function RemoveLanguage({
+  lang,
+  empty,
+  onRemove,
+}: {
+  lang: string;
+  empty: boolean;
+  onRemove(lang: string): void;
+}) {
+  return (
+    <button
+      type="button"
+      className="lang-remove"
+      disabled={!empty}
+      aria-label={`Remove ${langName(lang)}`}
+      title={
+        empty
+          ? `Remove ${langName(lang)} from this catalog`
+          : `${langName(lang)} has translations, so it can't be removed. Clear them first.`
+      }
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (empty) onRemove(lang);
+      }}
+    >
+      <TrashIcon size={12} />
+    </button>
   );
 }

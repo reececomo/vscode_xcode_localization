@@ -107,3 +107,85 @@ export function diffSpecifiers(source: string, target: string): SpecifierDiff {
     targetSpecs,
   };
 }
+
+// ---- Combined per-value check (printf + ICU) ----
+//
+// The grid, the Warnings filter and the toolbar count all need the same answer
+// to "is anything wrong with this translation?", so they ask here rather than
+// each assembling their own rules.
+
+import { diffIcuArguments, icuErrors, looksLikeIcu } from "./icu";
+
+export interface ValueProblems {
+  /** Format specifiers in the source that the translation dropped. */
+  specMissing: string[];
+  /** Format specifiers the translation invented. */
+  specExtra: string[];
+  /** ICU syntax errors in the translation itself. */
+  icuSyntax: string[];
+  /** ICU placeholders the translation dropped. */
+  icuMissing: string[];
+  /** ICU placeholders the translation invented. */
+  icuExtra: string[];
+  /** ICU placeholders whose type changed (a plural flattened, say). */
+  icuRetyped: string[];
+}
+
+export function hasProblems(p: ValueProblems): boolean {
+  return (
+    p.specMissing.length > 0 ||
+    p.specExtra.length > 0 ||
+    p.icuSyntax.length > 0 ||
+    p.icuMissing.length > 0 ||
+    p.icuExtra.length > 0 ||
+    p.icuRetyped.length > 0
+  );
+}
+
+/**
+ * Everything wrong with one translation, or null when there is nothing to say.
+ *
+ * An empty translation is never a problem — that is the "untranslated" state,
+ * which the grid reports its own way. A missing `sourceValue` means there is
+ * nothing to compare against, so only the checks that stand on their own (ICU
+ * syntax) run: a message that won't format is broken whether or not we can see
+ * what it was translated from.
+ */
+export function checkValue(
+  sourceValue: string | undefined,
+  value: string | undefined,
+  icuEnabled: boolean
+): ValueProblems | null {
+  if (!value || value.trim() === "") return null;
+
+  const spec =
+    sourceValue !== undefined
+      ? diffSpecifiers(sourceValue, value)
+      : { missing: [], extra: [] };
+
+  const icuSyntax = icuEnabled
+    ? icuErrors(value).map((e) => e.message)
+    : [];
+
+  const compareIcu =
+    icuEnabled &&
+    sourceValue !== undefined &&
+    (looksLikeIcu(sourceValue) || looksLikeIcu(value)) &&
+    // A message that doesn't parse has nothing meaningful to compare; the
+    // syntax error is the finding, and a second one about its arguments would
+    // just be the same mistake reported twice.
+    icuSyntax.length === 0;
+  const args = compareIcu
+    ? diffIcuArguments(sourceValue as string, value)
+    : { missing: [], extra: [], retyped: [] };
+
+  const problems: ValueProblems = {
+    specMissing: spec.missing,
+    specExtra: spec.extra,
+    icuSyntax,
+    icuMissing: args.missing,
+    icuExtra: args.extra,
+    icuRetyped: args.retyped,
+  };
+  return hasProblems(problems) ? problems : null;
+}

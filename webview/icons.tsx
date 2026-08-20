@@ -189,3 +189,33 @@ export function CircleFilledIcon(p: IconProps) {
     />
   );
 }
+
+/** "+" — add a string. */
+export function PlusIcon(p: IconProps) {
+  return <Codicon {...p} path="M14 7v1H8v6H7V8H1V7h6V1h1v6h6z" />;
+}
+
+/** "−" — remove a string. */
+export function MinusIcon(p: IconProps) {
+  return <Codicon {...p} path="M14 7v1H1V7h13z" />;
+}
+
+/** Trash — remove a language. */
+export function TrashIcon(p: IconProps) {
+  return (
+    <Codicon
+      {...p}
+      path="M10 3h3v1h-1v9l-1 1H4l-1-1V4H2V3h3V2a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1zM9 2H6v1h3V2zM4 13h7V4H4v9zm2-8H5v7h1V5zm3 0h1v7H9V5z"
+    />
+  );
+}
+
+/** Two arrows in a circle — sync with code. */
+export function SyncIcon(p: IconProps) {
+  return (
+    <Codicon
+      {...p}
+      path="M2.006 8.267L.78 9.5 0 8.73l2.09-2.07.76.01 2.09 2.12-.76.76-1.167-1.18a5 5 0 0 0 9.4 1.983l.813.597a6 6 0 0 1-11.22-2.683zm10.99-.466L11.83 6.635l-.76.76 2.09 2.12.76.01 2.09-2.07-.75-.76-1.194 1.18a6 6 0 0 0-11.11-2.92l.81.594a5 5 0 0 1 9.3 2.252z"
+    />
+  );
+}

@@ -4,7 +4,7 @@
 // entry matches if any of its rows has a matching displayed-target cell. Keys
 // marked `shouldTranslate: false` are skipped by every non-"all" filter.
 
-import { diffSpecifiers } from "./format";
+import { checkValue } from "./format";
 import type { CatalogEntry } from "./xcstrings";
 
 export type RowFilter =
@@ -21,7 +21,9 @@ export function entryMatchesFilter(
   filter: RowFilter,
   /** Whether the key may stand in as the source value (xcstrings); when false
    * (.strings) format warnings only compare against a real source value. */
-  keyAsSource = true
+  keyAsSource = true,
+  /** Whether ICU message problems count as warnings too. */
+  icuEnabled = true
 ): boolean {
   if (filter === "all") return true;
   if (!entry.shouldTranslate) return false;
@@ -45,9 +47,9 @@ export function entryMatchesFilter(
           if (cell?.state === "needs_review") return true;
           break;
         case "warnings":
-          if (!empty && sourceValue !== undefined && !diffSpecifiers(sourceValue, value).ok) {
-            return true;
-          }
+          // ICU syntax errors stand on their own, so this no longer needs a
+          // source value to have something to report.
+          if (checkValue(sourceValue, value, icuEnabled) !== null) return true;
           break;
         case "orphaned":
           // A key present in this (target) file but absent from the source
@@ -68,11 +70,12 @@ export function filterEntries(
   sourceLanguage: string,
   targets: string[],
   filter: RowFilter,
-  keyAsSource = true
+  keyAsSource = true,
+  icuEnabled = true
 ): CatalogEntry[] {
   if (filter === "all") return entries;
   return entries.filter((e) =>
-    entryMatchesFilter(e, sourceLanguage, targets, filter, keyAsSource)
+    entryMatchesFilter(e, sourceLanguage, targets, filter, keyAsSource, icuEnabled)
   );
 }
 
@@ -94,7 +97,8 @@ export function filterCounts(
   entries: CatalogEntry[],
   sourceLanguage: string,
   targets: string[],
-  keyAsSource = true
+  keyAsSource = true,
+  icuEnabled = true
 ): FilterCounts {
   let untranslated = 0;
   let needs_review = 0;
@@ -107,7 +111,9 @@ export function filterCounts(
     if (entryMatchesFilter(e, sourceLanguage, targets, "needs_review", keyAsSource)) {
       needs_review++;
     }
-    if (entryMatchesFilter(e, sourceLanguage, targets, "warnings", keyAsSource)) {
+    if (
+      entryMatchesFilter(e, sourceLanguage, targets, "warnings", keyAsSource, icuEnabled)
+    ) {
       warnings++;
     }
     if (entryMatchesFilter(e, sourceLanguage, targets, "orphaned", keyAsSource)) {

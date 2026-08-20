@@ -1019,4 +1019,165 @@ html, body { margin: 0; padding: 0; height: 100%; }
 .app.density-compact .key-flags,
 .app.density-compact .cell-foot,
 .app.density-compact .cell-warn { margin-top: 2px; }
+.app.density-compact .cell-comment,
+.app.density-compact .cell-state { padding-top: 2px; padding-bottom: 2px; }
+
+/* ---- Add / remove a string: the "+" and "−" pair at the toolbar's left. ---- */
+.row-actions {
+  display: inline-flex;
+  gap: 1px;
+  flex-shrink: 0;
+  margin-right: 6px;
+}
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.icon-btn:disabled:hover { background: transparent; }
+
+/* ---- Comment column ----
+   The note is guidance for whoever translates the row, not content, so it sits
+   a step back from the values it sits beside. */
+.cell-comment {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  opacity: 0.85;
+  font-size: 12px;
+}
+.comment-text { white-space: pre-wrap; word-break: break-word; }
+.comment-placeholder {
+  font-style: italic;
+  opacity: 0.5;
+  visibility: hidden;
+}
+.cell-comment-editable { cursor: text; }
+.grid-body .row:hover .comment-placeholder { visibility: visible; }
+.grid-body .row .cell-comment-editable:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+/* ---- State column ----
+   Xcode's at-a-glance answer: a green check when the string is done, an orange
+   NEW square when it has never been translated, a chip for anything else. */
+.cell-state { display: flex; align-items: flex-start; justify-content: flex-end; }
+.state-check {
+  display: inline-flex;
+  color: var(--vscode-charts-green, var(--vscode-testing-iconPassed));
+}
+.state-check svg { display: block; }
+.state-chip {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: var(--app-radius);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+/* Filled orange square. The text takes the editor background so it reads on the
+   badge in both light and dark themes. */
+.state-new {
+  background: #58282a;
+  border: 1.5px #9c4947 solid;
+  color: white;
+}
+.state-needs_review {
+  color: var(--vscode-editorWarning-foreground);
+  box-shadow: inset 0 0 0 1px currentColor;
+  font-size: 60%;
+}
+.state-stale {
+  color: var(--vscode-disabledForeground, var(--vscode-descriptionForeground));
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+.state-muted {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  opacity: 0.7;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+/* Metadata column headers sit level with the language headers but carry no
+   progress bar, so they only need the label row. */
+.head-meta { position: relative; }
+.head-meta .head-name { font-weight: 600; }
+
+/* ---- ICU MessageFormat highlighting ----
+   Structure is tinted, text is left alone: the eye should land on the braces
+   and branch names, which is where ICU messages actually go wrong. Braces cycle
+   through three hues by nesting depth so a pair reads as a pair. */
+.icu-brace { opacity: 0.9; }
+.icu-depth-0 { color: var(--vscode-editorBracketHighlight-foreground1, var(--vscode-charts-blue)); }
+.icu-depth-1 { color: var(--vscode-editorBracketHighlight-foreground2, var(--vscode-charts-orange)); }
+.icu-depth-2 { color: var(--vscode-editorBracketHighlight-foreground3, var(--vscode-charts-purple)); }
+.icu-arg {
+  color: var(--vscode-symbolIcon-variableForeground, var(--vscode-charts-blue));
+}
+.icu-type {
+  color: var(--vscode-symbolIcon-keywordForeground, var(--vscode-charts-purple));
+  font-weight: 600;
+}
+.icu-key {
+  color: var(--vscode-symbolIcon-enumeratorMemberForeground, var(--vscode-charts-green));
+}
+.icu-offset {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-style: italic;
+}
+/* The hash mark is the count itself — same treatment as a printf specifier,
+   because it plays the same role in the sentence. */
+.icu-hash {
+  color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+  font-weight: 600;
+}
+/* A quoted run is ICU syntax switched OFF, so it is shown as the plain text it
+   becomes rather than as structure. */
+.icu-quoted {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  opacity: 0.85;
+}
+/* Several problems can land on one cell, so the warning line wraps rather than
+   truncating one of them away. */
+.cell-warn span { white-space: pre-wrap; }
+
+/* ---- Add / remove a language, from the language popover ---- */
+.lang-remove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  color: var(--vscode-foreground);
+  background: transparent;
+  border: none;
+  border-radius: var(--app-radius);
+  opacity: 0;
+  cursor: pointer;
+}
+.lang-remove svg { display: block; }
+.lang-popover label:hover .lang-remove { opacity: 0.7; }
+.lang-remove:hover:not(:disabled) {
+  opacity: 1;
+  background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground));
+}
+.lang-remove:disabled { cursor: default; }
+.lang-popover label:hover .lang-remove:disabled { opacity: 0.3; }
+.lang-remove:focus-visible { opacity: 1; outline: 1px solid var(--vscode-focusBorder); }
+.pop-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 4px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--vscode-foreground);
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--vscode-widget-border, transparent);
+  cursor: pointer;
+}
+.pop-add svg { display: block; opacity: 0.8; }
+.pop-add:hover { background: var(--vscode-list-hoverBackground); }
+.pop-add:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 `;

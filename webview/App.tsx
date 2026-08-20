@@ -10,7 +10,7 @@ import type { Catalog, CatalogEntry } from "../src/shared/xcstrings";
 import { parseCatalog } from "../src/shared/xcstrings";
 import { keyRemovability, languageIsEmpty } from "../src/shared/manage";
 import { setLanguageNameOverrides, langName } from "../src/shared/langName";
-import { diffSpecifiers } from "../src/shared/format";
+import { checkValue } from "../src/shared/format";
 import { allLanguageProgress } from "../src/shared/progress";
 import {
   filterEntries,
@@ -36,6 +36,7 @@ import {
   PlusIcon,
   MinusIcon,
   TrashIcon,
+  SyncIcon,
 } from "./icons";
 import { MenuItem, MenuSeparator } from "./Menu";
 import { gridStyles } from "./gridStyles";
@@ -100,6 +101,11 @@ function postAddString() {
 function postRemoveStrings(keys: string[]) {
   post({ type: "removeStrings", keys });
 }
+/** Sweep the source: extract missing keys, re-file stale ones, refresh usage. */
+function postSyncCode() {
+  post({ type: "syncCode" });
+}
+
 function postAddLanguage() {
   post({ type: "addLanguage" });
 }
@@ -147,7 +153,11 @@ function defaultTargets(catalog: Catalog): string[] {
  * format specifiers diverge from the source. When `keyAsSource` is false
  * (.strings) the key is NOT used as a stand-in source, so a file with no real
  * source value (e.g. the source-language file itself) yields no warnings. */
-function countFormatWarnings(catalog: Catalog, keyAsSource: boolean): number {
+function countFormatWarnings(
+  catalog: Catalog,
+  keyAsSource: boolean,
+  icuEnabled: boolean
+): number {
   const src = catalog.sourceLanguage;
   let n = 0;
   for (const entry of catalog.entries) {
@@ -155,12 +165,9 @@ function countFormatWarnings(catalog: Catalog, keyAsSource: boolean): number {
       const sourceValue = keyAsSource
         ? row.cells[src]?.value ?? entry.key
         : row.cells[src]?.value;
-      if (sourceValue === undefined) continue;
       for (const lang of Object.keys(row.cells)) {
         if (lang === src) continue;
-        const value = row.cells[lang]?.value;
-        if (!value || value.trim() === "") continue;
-        if (!diffSpecifiers(sourceValue, value).ok) n++;
+        if (checkValue(sourceValue, row.cells[lang]?.value, icuEnabled)) n++;
       }
     }
   }
@@ -274,12 +281,14 @@ function ToolbarMenu({
   density,
   showComment,
   showState,
+  icuEnabled,
   scanning,
   usage,
   onToggleView,
   onToggleDensity,
   onToggleComment,
   onToggleState,
+  onToggleIcu,
   onScan,
   canManageLanguages,
   removableLanguages,
@@ -294,6 +303,7 @@ function ToolbarMenu({
   density: Density;
   showComment: boolean;
   showState: boolean;
+  icuEnabled: boolean;
   scanning: boolean;
   /** null until the first scan → drives the action's label. */
   usage: Record<string, number> | null;
@@ -301,6 +311,7 @@ function ToolbarMenu({
   onToggleDensity(): void;
   onToggleComment(): void;
   onToggleState(): void;
+  onToggleIcu(): void;
   onScan(): void;
   /** Whether languages can be managed from here (`.xcstrings` only). */
   canManageLanguages: boolean;
@@ -479,6 +490,7 @@ export function App() {
   const [showComment, setShowComment] = useState(true);
   const [showState, setShowState] = useState(true);
   const [allowManaged, setAllowManaged] = useState(false);
+  const [icuEnabled, setIcuEnabled] = useState(true);
   // For .strings the host ships a prebuilt catalog (it aggregates the opened
   // file + its source sibling); for .xcstrings the webview parses `text` itself.
   const [model, setModel] = useState<Catalog | null>(null);
@@ -508,6 +520,8 @@ export function App() {
   const [usage, setUsage] = useState<Record<string, number> | null>(null);
   const [usageFiles, setUsageFiles] = useState<number>(0);
   const [scanning, setScanning] = useState(false);
+  // A code sweep is running (the toolbar's sync button).
+  const [syncing, setSyncing] = useState(false);
   // The key under the grid's cursor — what the toolbar's "−" acts on.
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   // A key to jump to after it is added. The counter makes a repeat reveal of the
@@ -567,6 +581,7 @@ export function App() {
         setShowComment(msg.settings.showCommentColumn);
         setShowState(msg.settings.showStateColumn);
         setAllowManaged(msg.settings.allowRemovingManagedStrings);
+        setIcuEnabled(msg.settings.validateIcuMessages);
         setLanguageNameOverrides(msg.settings.languageNames ?? {});
       } else if (msg.type === "externalChange") {
         setExternalChange(true);
@@ -574,6 +589,8 @@ export function App() {
         setUsage(msg.counts);
         setUsageFiles(msg.filesScanned);
         setScanning(false);
+      } else if (msg.type === "syncDone") {
+        setSyncing(false);
       } else if (msg.type === "layout") {
         setChosen(msg.targets);
         setWidths(msg.widths);
@@ -684,8 +701,9 @@ export function App() {
   const hasData = keyCount > 0 && !catalog.error;
 
   const warnCount = useMemo(
-    () => (hasData ? countFormatWarnings(catalog, caps.keyAsSource) : 0),
-    [catalog, hasData, caps.keyAsSource]
+    () =>
+      hasData ? countFormatWarnings(catalog, caps.keyAsSource, icuEnabled) : 0,
+    [catalog, hasData, caps.keyAsSource, icuEnabled]
   );
   const progress = useMemo(() => allLanguageProgress(catalog), [catalog]);
   // Search first, then per-filter counts + the active filter share that result
@@ -734,7 +752,13 @@ export function App() {
   }, [catalog, baseline, targets]);
 
   const counts = useMemo<Record<UiFilter, number>>(() => {
-    const base = filterCounts(searched, catalog.sourceLanguage, targets, caps.keyAsSource);
+    const base = filterCounts(
+      searched,
+      catalog.sourceLanguage,
+      targets,
+      caps.keyAsSource,
+      icuEnabled
+    );
     const changed = diffEnabled
       ? searched.reduce((n, e) => n + (changedKeySet.has(e.key) ? 1 : 0), 0)
       : 0;
@@ -742,7 +766,7 @@ export function App() {
       ? searched.reduce((n, e) => n + (usage![e.key] === 0 ? 1 : 0), 0)
       : 0;
     return { ...base, changed, unused };
-  }, [searched, catalog.sourceLanguage, targets, changedKeySet, diffEnabled, caps.keyAsSource, usage, usageReady]);
+  }, [searched, catalog.sourceLanguage, targets, changedKeySet, diffEnabled, caps.keyAsSource, usage, usageReady, icuEnabled]);
 
   // Conditional tabs disappear when unavailable → fall back to All.
   const effectiveFilter: UiFilter =
@@ -773,9 +797,10 @@ export function App() {
       catalog.sourceLanguage,
       targets,
       effectiveFilter,
-      caps.keyAsSource
+      caps.keyAsSource,
+      icuEnabled
     );
-  }, [searched, catalog.sourceLanguage, targets, effectiveFilter, changedKeySet, caps.keyAsSource, usage]);
+  }, [searched, catalog.sourceLanguage, targets, effectiveFilter, changedKeySet, caps.keyAsSource, usage, icuEnabled]);
 
   return (
     <div className={"app" + (density === "compact" ? " density-compact" : "")}>
@@ -865,11 +890,35 @@ export function App() {
               />
             )}
           </SearchBox>
+          {caps.manageKeys && (
+            <button
+              type="button"
+              className={"icon-btn" + (syncing ? " active" : "")}
+              aria-label="Sync with code"
+              disabled={syncing}
+              title={
+                syncing
+                  ? "Scanning your source…"
+                  : "Sync with code — extract strings your code uses, flag keys it no longer references, and refresh usage counts"
+              }
+              onClick={() => {
+                setSyncing(true);
+                postSyncCode();
+              }}
+            >
+              {syncing ? (
+                <LoadingIcon size={14} className="spin" />
+              ) : (
+                <SyncIcon size={14} />
+              )}
+            </button>
+          )}
           <ToolbarMenu
             viewMode={viewMode}
             density={density}
             showComment={showComment}
             showState={showState}
+            icuEnabled={icuEnabled}
             scanning={scanning}
             usage={usage}
             onToggleView={() => {
@@ -891,6 +940,11 @@ export function App() {
               const next = !showState;
               setShowState(next); // optimistic; the setting echoes back
               postSetSettings({ showStateColumn: next });
+            }}
+            onToggleIcu={() => {
+              const next = !icuEnabled;
+              setIcuEnabled(next); // optimistic; the setting echoes back
+              postSetSettings({ validateIcuMessages: next });
             }}
             onScan={runScan}
             canManageLanguages={caps.manageLanguages}
@@ -947,6 +1001,7 @@ export function App() {
           showComment={showComment}
           showState={showState}
           stateLang={stateLang}
+          icuEnabled={icuEnabled}
           onResize={setColWidth}
           onResetWidth={resetColWidth}
           onSetValue={postSetValue}

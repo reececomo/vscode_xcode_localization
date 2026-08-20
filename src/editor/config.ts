@@ -6,15 +6,41 @@
 // original Xcode-only behaviour.
 
 import * as vscode from "vscode";
+import { DEFAULT_TRANSLATION_FUNCTIONS } from "../shared/extract";
 
 /** File name patterns treated as String Catalogs. */
-export const DEFAULT_CATALOG_PATTERNS = ["*.xcstrings"];
+export const DEFAULT_CATALOG_PATTERNS = ["*.xcstrings", "*.strings.json"];
 /** File name patterns searched when looking for a key in code. */
-export const DEFAULT_SOURCE_PATTERNS = ["*.swift", "*.m", "*.mm"];
+export const DEFAULT_SOURCE_PATTERNS = ["*.swift", "*.m", "*.mm", "*.ts"];
 
-/** Vendor dirs never scanned — framework / Pods code would skew every count. */
-export const EXCLUDE_GLOB =
-  "{**/Pods/**,**/*.xcframework/**,**/Carthage/**,**/build/**,**/DerivedData/**,**/node_modules/**,**/.build/**}";
+/**
+ * Files and folders never scanned.
+ *
+ * Two different reasons live here. `node_modules` and `.git` are listed so a
+ * big tree isn't walked just to throw the results away — both are gitignored in
+ * every project anyway, and gitignore is what does the real work (see
+ * `projectFiles.ts`).
+ *
+ * Tests are the other reason, and they are NOT gitignored, so they have to be
+ * named. A string in a test is an assertion about the app, not part of it:
+ * extracting from one invents catalog entries nobody ships, and counting one as
+ * a reference keeps a dead key alive for ever — the test would keep passing
+ * long after the feature was deleted.
+ */
+export const DEFAULT_EXCLUDE_PATTERNS = [
+  "**/node_modules/**",
+  "**/.git/**",
+  "**/*.test.*",
+  "**/*.spec.*",
+  "**/__tests__/**",
+  "**/__mocks__/**",
+];
+
+/** The configured excludes as one glob for `findFiles`. */
+export function excludeGlob(): string {
+  const patterns = patternList("excludePatterns", DEFAULT_EXCLUDE_PATTERNS);
+  return patterns.length === 1 ? patterns[0] : `{${patterns.join(",")}}`;
+}
 
 function config() {
   return vscode.workspace.getConfiguration("xcodeI18n");
@@ -98,6 +124,43 @@ export function isCatalogFile(uri: vscode.Uri): boolean {
   );
 }
 
+/** Function names treated as localization calls when extracting keys. */
+export function translationFunctions(): string[] {
+  return patternList("translationFunctions", DEFAULT_TRANSLATION_FUNCTIONS);
+}
+
+/**
+ * Where to look for strings to extract, relative to the catalog file's own
+ * folder. The default of ".." is deliberately tight: a catalog at
+ * `client/lang/messages.xcstrings` describes `client/`, not the whole monorepo,
+ * so extraction stays scoped to the module that owns it.
+ */
+export function extractionRoot(catalog: vscode.Uri): vscode.Uri {
+  const configured =
+    vscode.workspace.getConfiguration("xcodeI18n").get<string>("extractionRoot") ??
+    "..";
+  const folder = vscode.Uri.joinPath(catalog, "..");
+  return vscode.Uri.joinPath(folder, configured.trim() || "..");
+}
+
+/** Whether changing a source string flags its translations for review. */
+export function autoMarkNeedsReview(): boolean {
+  return (
+    vscode.workspace
+      .getConfiguration("xcodeI18n")
+      .get<boolean>("autoMarkNeedsReview") ?? true
+  );
+}
+
+/** Whether a sweep marks previously extracted keys it no longer finds as stale. */
+export function markMissingKeysStale(): boolean {
+  return (
+    vscode.workspace
+      .getConfiguration("xcodeI18n")
+      .get<boolean>("markMissingKeysStale") ?? true
+  );
+}
+
 /** Display-name overrides for language tags `Intl` doesn't recognise. */
 export function languageNameOverrides(): Record<string, string> {
   const raw = config().get<unknown>("languageNames");
@@ -117,5 +180,9 @@ export const WATCHED_SETTINGS = [
   "xcodeI18n.showCommentColumn",
   "xcodeI18n.showStateColumn",
   "xcodeI18n.allowRemovingManagedStrings",
+  "xcodeI18n.validateIcuMessages",
+  "xcodeI18n.translationFunctions",
+  "xcodeI18n.excludePatterns",
+  "xcodeI18n.autoMarkNeedsReview",
   "xcodeI18n.languageNames",
 ];

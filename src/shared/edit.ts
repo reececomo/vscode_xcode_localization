@@ -52,6 +52,23 @@ function jsonString(s: string): string {
   return JSON.stringify(s);
 }
 
+/**
+ * The file's own indent unit. Xcode writes two spaces, but a catalog that has
+ * been through Prettier or an editor's formatter may well be tab-indented —
+ * and inserting two spaces into a tab-indented file mixes the two on every new
+ * line. The root object's first property sits exactly one level in, so its
+ * leading whitespace IS the unit.
+ */
+function indentUnitOf(text: string, root: Node, ctx: EditContext): string {
+  if (ctx.indentUnit) return ctx.indentUnit;
+  const props = (root.children ?? []).filter((c) => c.type === "property");
+  if (props.length > 0) {
+    const indent = lineIndentAt(text, props[0].offset);
+    if (indent !== "") return indent;
+  }
+  return "  ";
+}
+
 /** Leading whitespace of the line containing `offset` (handles CRLF and LF). */
 function lineIndentAt(text: string, offset: number): string {
   const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
@@ -76,14 +93,28 @@ export function setTranslation(
   lang: string,
   segments: string[],
   value: string,
-  ctx: EditContext
+  ctx: EditContext,
+  /** When the edited cell is the SOURCE language, also flag the translations
+   * made from it as needing review — they were written against the old text. */
+  markOthersForReview = false
 ): EditResult {
   const root = parseTree(text);
   if (!root) return { edits: [], reason: "JSON could not be parsed" };
 
-  const indentUnit = ctx.indentUnit ?? "  ";
+  const indentUnit = indentUnitOf(text, root, ctx);
   const isEmpty = value.trim() === "";
   const newState = isEmpty ? "new" : "translated";
+
+  // Computed against the ORIGINAL text, like every other edit here, and only
+  // touching other languages — so these spans can never overlap the value edit.
+  const review =
+    markOthersForReview && lang === readSourceLanguageFrom(root)
+      ? reviewEdits(text, root, key, lang, segments, ctx)
+      : [];
+  const withReview = (result: EditResult): EditResult =>
+    result.edits.length > 0
+      ? { ...result, edits: [...result.edits, ...review] }
+      : result;
 
   // `segments` is the relative jsonc path to the variation node (e.g.
   // ["variations","plural","one"] or ["substitutions","count","variations",
@@ -99,27 +130,31 @@ export function setTranslation(
 
   const unitNode = findNodeAtLocation(root, base);
   if (unitNode) {
-    return replaceExisting(text, root, base, value, newState, ctx);
+    return withReview(replaceExisting(text, root, base, value, newState, ctx));
   }
 
   if (isEmpty) return { edits: [] };
 
   const locNode = findNodeAtLocation(root, ["strings", key, "localizations"]);
-  if (!locNode || locNode.type !== "object") {
-    return {
-      edits: [],
-      reason: "key has no 'localizations' yet — creating one is not supported yet",
-    };
+  if (!locNode) {
+    // A key added by hand or pulled in by extraction has no `localizations`
+    // block at all yet — the first translation typed into it creates one.
+    return withReview(
+      createLocalizations(text, root, key, lang, segments, value, newState, ctx, indentUnit)
+    );
+  }
+  if (locNode.type !== "object") {
+    return { edits: [], reason: "'localizations' is not an object" };
   }
 
   // Simple cell → the verified single-stringUnit insert. Variant cell → build
   // the smallest missing subtree along the variations path.
   if (segments.length === 0) {
-    return {
+    return withReview({
       edits: [insertLanguage(text, locNode, lang, value, ctx, indentUnit)],
-    };
+    });
   }
-  return insertCell(text, locNode, lang, segments, value, ctx, indentUnit);
+  return withReview(insertCell(text, locNode, lang, segments, value, ctx, indentUnit));
 }
 
 function replaceExisting(
@@ -179,11 +214,11 @@ function insertLanguage(
 ): TextReplace {
   const eol = ctx.eol;
   const parentIndent = lineIndentAt(text, locNode.offset); // the `"localizations" : {` line
-  const baseIndent = parentIndent + indentUnit; // where `"<lang>"` goes
-
-  const block = renderLangBlock(lang, value, baseIndent, eol, indentUnit);
 
   const props = (locNode.children ?? []).filter((c) => c.type === "property");
+  const baseIndent = propertyIndent(text, locNode, indentUnit);
+
+  const block = renderLangBlock(lang, value, baseIndent, eol, indentUnit);
   const entries = props.map((p) => ({
     name: String(p.children![0].value),
     node: p,
@@ -358,6 +393,150 @@ function insertCell(
   };
 }
 
+/** Nest `leaf` under each name in `chain`, outermost first. */
+function nest(chain: string[], leaf: JsonValue): JsonValue {
+  let out = leaf;
+  for (let i = chain.length - 1; i >= 0; i--) out = { [chain[i]]: out };
+  return out;
+}
+
+/**
+ * Create the whole `localizations` block for a key that has none, carrying the
+ * first translation. This is the normal state of a freshly added or freshly
+ * extracted key, so it is a routine path rather than an edge case.
+ *
+ * Substitutions are the exception: they carry `formatSpecifier` / `argNum`
+ * metadata that cannot be invented, so a substitution cell still declines.
+ */
+function createLocalizations(
+  text: string,
+  root: Node,
+  key: string,
+  lang: string,
+  segments: string[],
+  value: string,
+  newState: string,
+  ctx: EditContext,
+  indentUnit: string
+): EditResult {
+  if (segments.includes("substitutions")) {
+    return {
+      edits: [],
+      reason:
+        "no such substitution in this language yet — add the language in Xcode first",
+    };
+  }
+  const keyNode = findKeyObject(root, key);
+  if (!keyNode) return { edits: [], reason: `key not found: ${key}` };
+
+  const shape = nest([lang, ...segments, "stringUnit"], {
+    state: newState,
+    value,
+  });
+  const valueText = renderJsonValue(
+    shape,
+    propertyIndent(text, keyNode, indentUnit),
+    ctx.eol,
+    indentUnit
+  );
+  return {
+    edits: [
+      insertProperty(text, keyNode, "localizations", valueText, ctx, indentUnit),
+    ],
+  };
+}
+
+// ---- Keeping translations honest when the source moves ----
+//
+// A translation is only correct with respect to the source it was made from.
+// Change that source — reword the English, add a plural form — and every
+// translation of it becomes a claim nobody has checked. Xcode's answer is the
+// `needs_review` state, and this is where it gets applied.
+//
+// Only settled translations are flagged. An empty cell is already "new", and a
+// cell that is already `needs_review` or `stale` is already saying "look at me";
+// re-flagging either would be noise.
+
+/**
+ * Flag every OTHER language's translation of one cell as needing review.
+ * `segments` is the variant path ([] for the plain stringUnit).
+ */
+export function markNeedsReview(
+  text: string,
+  key: string,
+  sourceLanguage: string,
+  segments: string[],
+  ctx: EditContext
+): TextReplace[] {
+  const root = parseTree(text);
+  if (!root) return [];
+  return reviewEdits(text, root, key, sourceLanguage, segments, ctx);
+}
+
+function reviewEdits(
+  text: string,
+  root: Node,
+  key: string,
+  sourceLanguage: string,
+  segments: string[],
+  ctx: EditContext
+): TextReplace[] {
+  const indentUnit = indentUnitOf(text, root, ctx);
+  const locNode = findNodeAtLocation(root, ["strings", key, "localizations"]);
+  if (!locNode || locNode.type !== "object") return [];
+
+  const out: TextReplace[] = [];
+  for (const prop of locNode.children ?? []) {
+    if (prop.type !== "property" || !prop.children) continue;
+    const lang = String(prop.children[0].value);
+    if (lang === sourceLanguage) continue;
+
+    const unitPath = [
+      "strings",
+      key,
+      "localizations",
+      lang,
+      ...segments,
+      "stringUnit",
+    ];
+    const unit = findNodeAtLocation(root, unitPath);
+    if (!unit || unit.type !== "object") continue;
+
+    const valueNode = findNodeAtLocation(root, [...unitPath, "value"]);
+    const value = typeof valueNode?.value === "string" ? valueNode.value : "";
+    if (value.trim() === "") continue; // nothing translated here yet
+
+    const stateNode = findNodeAtLocation(root, [...unitPath, "state"]);
+    const state =
+      typeof stateNode?.value === "string" ? stateNode.value : "translated";
+    if (state !== "translated") continue; // already flagged one way or another
+
+    if (stateNode) {
+      out.push({
+        offset: stateNode.offset,
+        length: stateNode.length,
+        newText: jsonString("needs_review"),
+      });
+    } else {
+      out.push(
+        insertProperty(text, unit, "state", jsonString("needs_review"), ctx, indentUnit)
+      );
+    }
+  }
+  return out;
+}
+
+function readSourceLanguageFrom(root: Node): string {
+  const node = findNodeAtLocation(root, ["sourceLanguage"]);
+  return typeof node?.value === "string" ? node.value : "";
+}
+
+/** The catalog's source language, read straight from the JSON. */
+export function readSourceLanguage(text: string): string {
+  const root = parseTree(text);
+  return root ? readSourceLanguageFrom(root) : "";
+}
+
 // ---- String-level config: comment, shouldTranslate, per-cell state ----
 //
 // These edit object properties rather than translation values. Xcode writes
@@ -366,6 +545,23 @@ function insertCell(
 // shouldTranslate, and within a stringUnit: state < value. We insert each new
 // property at its correct slot so the diff stays clean and Xcode won't reshuffle
 // it on the next save.
+
+/**
+ * The indent a new property of `objNode` should sit at. An existing sibling
+ * already knows the answer; only an empty object has to derive it from its
+ * parent. Rendering a value and inserting it both go through here, so the two
+ * can never disagree about where the line starts.
+ */
+function propertyIndent(
+  text: string,
+  objNode: Node,
+  indentUnit: string
+): string {
+  const props = (objNode.children ?? []).filter((c) => c.type === "property");
+  return props.length > 0
+    ? lineIndentAt(text, props[0].offset)
+    : lineIndentAt(text, objNode.offset) + indentUnit;
+}
 
 /** Find a direct property node by name in an object node, or null. */
 function findProperty(objNode: Node, name: string): Node | null {
@@ -404,10 +600,9 @@ function insertProperty(
 ): TextReplace {
   const eol = ctx.eol;
   const parentIndent = lineIndentAt(text, objNode.offset); // the `… : {` line
-  const baseIndent = parentIndent + indentUnit; // where the property goes
-  const block = `${jsonString(name)} : ${valueText}`;
-
   const props = (objNode.children ?? []).filter((c) => c.type === "property");
+  const baseIndent = propertyIndent(text, objNode, indentUnit);
+  const block = `${jsonString(name)} : ${valueText}`;
 
   // Empty object — `{}` or Xcode's `{` + blank line + `}`. Replace everything
   // BETWEEN the braces so the existing filler doesn't survive as a blank line.
@@ -534,7 +729,7 @@ export function setComment(
 ): EditResult {
   const root = parseTree(text);
   if (!root) return { edits: [], reason: "JSON could not be parsed" };
-  const indentUnit = ctx.indentUnit ?? "  ";
+  const indentUnit = indentUnitOf(text, root, ctx);
 
   const keyNode = findKeyObject(root, key);
   if (!keyNode) return { edits: [], reason: `key not found: ${key}` };
@@ -570,7 +765,7 @@ export function setShouldTranslate(
 ): EditResult {
   const root = parseTree(text);
   if (!root) return { edits: [], reason: "JSON could not be parsed" };
-  const indentUnit = ctx.indentUnit ?? "  ";
+  const indentUnit = indentUnitOf(text, root, ctx);
 
   const keyNode = findKeyObject(root, key);
   if (!keyNode) return { edits: [], reason: `key not found: ${key}` };
@@ -614,7 +809,7 @@ export function setState(
 ): EditResult {
   const root = parseTree(text);
   if (!root) return { edits: [], reason: "JSON could not be parsed" };
-  const indentUnit = ctx.indentUnit ?? "  ";
+  const indentUnit = indentUnitOf(text, root, ctx);
 
   const base = unitPath(key, lang, segments);
   const unitNode = findNodeAtLocation(root, base);
@@ -726,30 +921,7 @@ export function addString(
   key: string,
   ctx: EditContext
 ): EditResult {
-  const root = parseTree(text);
-  if (!root) return { edits: [], reason: "JSON could not be parsed" };
-  const indentUnit = ctx.indentUnit ?? "  ";
-
-  const stringsNode = findStringsTable(root);
-  if (!stringsNode) {
-    return { edits: [], reason: "this file has no 'strings' table" };
-  }
-  if (findProperty(stringsNode, key)) {
-    return { edits: [], reason: `the key "${key}" already exists` };
-  }
-
-  const indent = lineIndentAt(text, stringsNode.offset) + indentUnit;
-  const valueText = renderJsonValue(
-    { extractionState: "manual" },
-    indent,
-    ctx.eol,
-    indentUnit
-  );
-  return {
-    edits: [
-      insertProperty(text, stringsNode, key, valueText, ctx, indentUnit, "end"),
-    ],
-  };
+  return addStrings(text, [{ key, extractionState: "manual" }], ctx);
 }
 
 /** Delete whole keys (with every localization) from the catalog. */
@@ -839,7 +1011,7 @@ export function addLanguage(
 ): EditResult {
   const root = parseTree(text);
   if (!root) return { edits: [], reason: "JSON could not be parsed" };
-  const indentUnit = ctx.indentUnit ?? "  ";
+  const indentUnit = indentUnitOf(text, root, ctx);
 
   const stringsNode = findStringsTable(root);
   if (!stringsNode) {
@@ -939,4 +1111,132 @@ export function removeLanguage(
     return { edits: [], reason: `${lang} is not in this catalog` };
   }
   return { edits };
+}
+
+/** A key to create, with the metadata that says where it came from. */
+export interface NewString {
+  key: string;
+  /** Translator note. Only written when non-empty. */
+  comment?: string;
+  /** How the key got here — see the `extractionState` lifecycle. */
+  extractionState?: string;
+}
+
+/**
+ * Add several keys in ONE insertion.
+ *
+ * Extraction can bring in dozens of keys at once, and inserting them one at a
+ * time would mean many edits computed against the same offset — the order they
+ * land in is then anyone's guess. Building a single block keeps it deterministic
+ * and keeps the diff to one hunk. Keys already present are skipped rather than
+ * duplicated.
+ */
+export function addStrings(
+  text: string,
+  items: readonly NewString[],
+  ctx: EditContext
+): EditResult {
+  const root = parseTree(text);
+  if (!root) return { edits: [], reason: "JSON could not be parsed" };
+  const indentUnit = indentUnitOf(text, root, ctx);
+
+  const stringsNode = findStringsTable(root);
+  if (!stringsNode) {
+    return { edits: [], reason: "this file has no 'strings' table" };
+  }
+
+  const seen = new Set<string>();
+  const fresh = items.filter((item) => {
+    if (item.key === "" || seen.has(item.key)) return false;
+    seen.add(item.key);
+    return !findProperty(stringsNode, item.key);
+  });
+  if (fresh.length === 0) {
+    return { edits: [], reason: "every key is already in this catalog" };
+  }
+
+  const parentIndent = lineIndentAt(text, stringsNode.offset);
+  const existing = (stringsNode.children ?? []).filter((c) => c.type === "property");
+  const indent = propertyIndent(text, stringsNode, indentUnit);
+  const blocks = fresh.map(
+    (item) =>
+      `${jsonString(item.key)} : ${renderJsonValue(
+        {
+          comment: item.comment && item.comment.trim() !== "" ? item.comment : undefined,
+          extractionState: item.extractionState,
+        },
+        indent,
+        ctx.eol,
+        indentUnit
+      )}`
+  );
+  const body = blocks.join(`,${ctx.eol}${indent}`);
+
+  const props = existing;
+  if (props.length === 0) {
+    const open = stringsNode.offset + 1;
+    const close = stringsNode.offset + stringsNode.length - 1;
+    return {
+      edits: [
+        {
+          offset: open,
+          length: Math.max(0, close - open),
+          newText: `${ctx.eol}${indent}${body}${ctx.eol}${parentIndent}`,
+        },
+      ],
+    };
+  }
+
+  const last = props[props.length - 1];
+  return {
+    edits: [
+      {
+        offset: last.offset + last.length,
+        length: 0,
+        newText: `,${ctx.eol}${indent}${body}`,
+      },
+    ],
+  };
+}
+
+/**
+ * Set (or clear) a key's `extractionState` — how it got into the catalog.
+ *
+ * An empty state removes the property, which is how a catalog says "extracted
+ * normally". Setting "stale" is how a sweep records that the code referencing a
+ * key has gone: the entry stays, with its translations, until someone decides
+ * to delete it.
+ */
+export function setExtractionState(
+  text: string,
+  key: string,
+  state: string,
+  ctx: EditContext
+): EditResult {
+  const root = parseTree(text);
+  if (!root) return { edits: [], reason: "JSON could not be parsed" };
+  const indentUnit = indentUnitOf(text, root, ctx);
+
+  const keyNode = findKeyObject(root, key);
+  if (!keyNode) return { edits: [], reason: `key not found: ${key}` };
+
+  const existing = findProperty(keyNode, "extractionState");
+
+  if (state.trim() === "") {
+    if (!existing) return { edits: [] };
+    const rem = removeProperty(text, keyNode, "extractionState", ctx);
+    return { edits: rem ? [rem] : [] };
+  }
+
+  if (existing) {
+    const v = propValue(existing);
+    return {
+      edits: [{ offset: v.offset, length: v.length, newText: jsonString(state) }],
+    };
+  }
+  return {
+    edits: [
+      insertProperty(text, keyNode, "extractionState", jsonString(state), ctx, indentUnit),
+    ],
+  };
 }

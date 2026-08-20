@@ -113,7 +113,10 @@ export async function confirmRemoveStrings(
   document: vscode.TextDocument,
   keys: string[],
   isCatalog: boolean,
-  blocked: Map<string, string>
+  blocked: Map<string, string>,
+  /** Keys still named in a comment. Not a reason to refuse — the string isn't
+   * in the app — but a reason to say so before it goes. */
+  mentionedInComments: string[] = []
 ): Promise<boolean> {
   if (keys.length === 0) return false;
 
@@ -127,15 +130,22 @@ export async function confirmRemoveStrings(
 
   const what =
     keys.length === 1 ? `"${keys[0]}"` : `${keys.length} strings`;
+  const detail = [
+    keys.length === 1
+      ? "The key and all of its translations are removed from this file. You can undo this."
+      : `${keys.join("\n")}\n\nEach key and all of its translations are removed from this file. You can undo this.`,
+  ];
+  if (mentionedInComments.length > 0) {
+    detail.push(
+      "",
+      mentionedInComments.length === 1
+        ? `Note: "${mentionedInComments[0]}" still appears in a commented-out line. That isn't a reference — the string isn't in your app — but if you meant to restore that code, keep the key.`
+        : `Note: ${mentionedInComments.length} of these still appear in commented-out lines. That isn't a reference — the strings aren't in your app — but if you meant to restore that code, keep the keys.`
+    );
+  }
   const confirmed = await vscode.window.showWarningMessage(
     `Delete ${what}?`,
-    {
-      modal: true,
-      detail:
-        keys.length === 1
-          ? "The key and all of its translations are removed from this file. You can undo this."
-          : `${keys.join("\n")}\n\nEach key and all of its translations are removed from this file. You can undo this.`,
-    },
+    { modal: true, detail: detail.join("\n") },
     "Delete"
   );
   if (confirmed !== "Delete") return false;

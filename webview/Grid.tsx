@@ -18,7 +18,12 @@ import type {
   CatalogRow,
 } from "../src/shared/xcstrings";
 import { stateLabel } from "../src/shared/xcstrings";
-import { diffSpecifiers, tokenizeFormat } from "../src/shared/format";
+import {
+  checkValue,
+  tokenizeFormat,
+  type ValueProblems,
+} from "../src/shared/format";
+import { icu, looksLikeIcu, type IcuToken } from "../src/shared/icu";
 import { findRanges } from "../src/shared/search";
 import type { LangProgress } from "../src/shared/progress";
 import { useRowVirtualizer } from "./virtualizer";
@@ -157,11 +162,11 @@ function Highlight({ text, query }: { text: string; query: string }) {
   return <>{out}</>;
 }
 
-/**
- * Render a value with format specifiers (%@, %lld, %1$@…) highlighted, and the
- * active search query highlighted within the plain-text segments.
- */
-function FormatValue({ value }: { value: string }) {
+/** Whether ICU messages are parsed at all (the `validateIcuMessages` setting). */
+const IcuContext = createContext(true);
+
+/** Plain text with printf specifiers and the search query highlighted. */
+function PlainValue({ value }: { value: string }) {
   const query = useContext(QueryContext);
   return (
     <>
@@ -180,22 +185,49 @@ function FormatValue({ value }: { value: string }) {
   );
 }
 
-/** Format-specifier mismatch (null if matching / translation is empty). */
-interface FormatWarn {
-  missing: string[];
-  extra: string[];
+/** Class for one ICU token. Braces are tinted by depth so a pair reads as a
+ * pair, the way bracket-pair colouring works in the editor. */
+function icuClass(token: IcuToken): string {
+  if (token.kind === "brace" || token.kind === "comma") {
+    return `icu-brace icu-depth-${token.depth % 3}`;
+  }
+  return `icu-${token.kind}`;
 }
 
-function computeWarn(
-  sourceValue: string | undefined,
-  value: string | undefined
-): FormatWarn | null {
-  // No source value to compare against (e.g. editing a .strings source file, or
-  // a key absent from the source) → nothing to validate.
-  if (sourceValue === undefined) return null;
-  if (!value || value.trim() === "") return null;
-  const d = diffSpecifiers(sourceValue, value);
-  return d.ok ? null : { missing: d.missing, extra: d.extra };
+/**
+ * Render a value with its syntax highlighted: ICU structure when the value is an
+ * ICU message (`{count, plural, …}`), and printf specifiers (%@, %lld, %1$@…)
+ * plus the active search query inside the plain-text runs either way.
+ */
+function FormatValue({ value }: { value: string }) {
+  const icuEnabled = useContext(IcuContext);
+  if (!icuEnabled || !looksLikeIcu(value)) {
+    return <PlainValue value={value} />;
+  }
+  return (
+    <>
+      {icu(value).tokens.map((token, i) => {
+        // `display` is the span with ICU's quoting resolved — `it''s` reads as
+        // `it's`, `'{0}'` as a literal `{0}`. The preview should show the string
+        // as it will appear in the app; the editor still holds the raw value.
+        const shown = token.display ?? token.text;
+        if (token.kind === "text") return <PlainValue key={i} value={shown} />;
+        return (
+          <span
+            key={i}
+            className={icuClass(token)}
+            title={
+              token.kind === "quoted"
+                ? `Literal text — written as ${token.text}`
+                : undefined
+            }
+          >
+            {shown}
+          </span>
+        );
+      })}
+    </>
+  );
 }
 
 /** "@" → "%@", "1$@" → "%1$@" for display. */
@@ -203,23 +235,32 @@ function showSpec(sig: string): string {
   return "%" + sig;
 }
 
-function warnText(warn: FormatWarn): string {
-  const parts: string[] = [];
-  if (warn.missing.length)
-    parts.push("missing " + warn.missing.map(showSpec).join(", "));
-  if (warn.extra.length)
-    parts.push("extra " + warn.extra.map(showSpec).join(", "));
-  return parts.join(" · ");
+/** One line per problem, most severe first: a message that will not format at
+ * all outranks one whose arguments merely drifted from the source. */
+function warnLines(warn: ValueProblems): string[] {
+  const lines: string[] = [...warn.icuSyntax];
+  if (warn.specMissing.length) {
+    lines.push("Missing " + warn.specMissing.map(showSpec).join(", "));
+  }
+  if (warn.specExtra.length) {
+    lines.push("Extra " + warn.specExtra.map(showSpec).join(", "));
+  }
+  if (warn.icuMissing.length) {
+    lines.push("Missing placeholder " + warn.icuMissing.join(", "));
+  }
+  if (warn.icuExtra.length) {
+    lines.push("Extra placeholder " + warn.icuExtra.join(", "));
+  }
+  for (const change of warn.icuRetyped) lines.push("Changed " + change);
+  return lines;
 }
 
-function FormatWarning({ warn }: { warn: FormatWarn }) {
+function FormatWarning({ warn }: { warn: ValueProblems }) {
+  const lines = warnLines(warn);
   return (
-    <div
-      className="cell-warn"
-      title={`Format specifiers don't match the source — ${warnText(warn)}`}
-    >
+    <div className="cell-warn" title={lines.join("\n")}>
       <WarningIcon size={12} />
-      <span>{warnText(warn)}</span>
+      <span>{lines.join(" · ")}</span>
     </div>
   );
 }
@@ -257,6 +298,9 @@ interface GridProps {
   /** Language the State column describes: the first displayed target, or the
    * source when no target is shown. */
   stateLang: string;
+  /** Parse values as ICU messages — highlight their structure and report the
+   * syntax errors that would throw at format time. */
+  icuEnabled: boolean;
   /** Live column resize (while dragging). */
   onResize(colId: string, px: number): void;
   /** Reset a column to its default width (double-click). */
@@ -347,6 +391,7 @@ export function Grid({
   showComment,
   showState,
   stateLang,
+  icuEnabled,
   onResize,
   onResetWidth,
   onSetValue,
@@ -788,6 +833,7 @@ export function Grid({
 
   return (
     <QueryContext.Provider value={query}>
+    <IcuContext.Provider value={icuEnabled}>
     <>
     <div
       className="grid-wrap"
@@ -898,6 +944,7 @@ export function Grid({
                     showComment={showComment}
                     showState={showState}
                     stateLang={stateLang}
+                    icuEnabled={icuEnabled}
                     metaAfter={metaAfter}
                     cursorLang={langs[startCol]}
                     unused={!!usage && usage[fr.entry.key] === 0}
@@ -1031,6 +1078,7 @@ export function Grid({
         );
       })()}
     </>
+    </IcuContext.Provider>
     </QueryContext.Provider>
   );
 }
@@ -1070,6 +1118,8 @@ interface RowViewProps {
   showState: boolean;
   /** Language the State column reports on. */
   stateLang: string;
+  /** Whether ICU messages are parsed (highlighted + validated). */
+  icuEnabled: boolean;
   /** How many value columns precede the metadata columns — 1 when a sticky
    * source column has to stay adjacent to the key, 0 otherwise. */
   metaAfter: number;
@@ -1112,6 +1162,7 @@ function RowView({
   showComment,
   showState,
   stateLang,
+  icuEnabled,
   metaAfter,
   cursorLang,
   unused,
@@ -1304,7 +1355,14 @@ function RowView({
     // its edit writes localizations[source] and never renames the key. Targets
     // are editable when the key is translatable.
     const editable = isSource ? sourceEditable : translatable;
-    const warn = isSource ? null : computeWarn(sourceValue, cell?.value);
+    // The source column is checked too, but only against itself: there is
+    // nothing to compare it to, and a source message that won't format is a bug
+    // wherever it lives.
+    const warn = checkValue(
+      isSource ? undefined : sourceValue,
+      cell?.value,
+      icuEnabled
+    );
 
     // Changed-since-commit marker (target columns only — the source column is
     // sticky/positioned and not edited here).
@@ -1546,26 +1604,29 @@ function RefCell({
       );
     }
     const empty = value.trim() === "";
+    // Same rule as a value cell: nothing there means nothing to protect, so one
+    // click starts typing.
+    const editOnSingleClick = !doubleClickToEdit || empty;
     const cls =
       "cell-value ref-source" +
       (canEditSource ? " ref-source-editable" : "") +
       (sourceActive ? " cell-active" : "");
-    const hint = doubleClickToEdit
-      ? "Base language — double-click to edit"
-      : "Base language — click to edit";
+    const hint = editOnSingleClick
+      ? "Base language — click to edit"
+      : "Base language — double-click to edit";
     return (
       <div
         className={cls}
         title={canEditSource ? hint : undefined}
         onClick={
           canEditSource
-            ? doubleClickToEdit
-              ? onSourceActivate
-              : onSourceStartEdit
+            ? editOnSingleClick
+              ? onSourceStartEdit
+              : onSourceActivate
             : undefined
         }
         onDoubleClick={
-          canEditSource && doubleClickToEdit ? onSourceStartEdit : undefined
+          canEditSource && !editOnSingleClick ? onSourceStartEdit : undefined
         }
       >
         {empty ? (
@@ -1663,7 +1724,7 @@ function UnusedFlag() {
   return (
     <span
       className="flag flag-unused"
-      title="No reference found in your Swift/Obj-C code. It might still be used via string interpolation, storyboards/XIBs, or built at runtime — verify before deleting."
+      title="No reference found in your code. Commented-out calls don't count — the string isn't in the app. It might still be used via string interpolation, storyboards/XIBs, or built at runtime, so verify before deleting."
     >
       unused
     </span>
@@ -1855,7 +1916,7 @@ function ReadonlyCell({
 }: {
   cell: CatalogCell | undefined;
   fallback?: string;
-  warn?: FormatWarn | null;
+  warn?: ValueProblems | null;
   emptyText?: string;
   sticky?: boolean;
   onMenu?: (pos: MenuPos) => void;
@@ -2066,7 +2127,7 @@ function EditableCell({
   hideStateBadge,
 }: {
   cell: CatalogCell | undefined;
-  warn: FormatWarn | null;
+  warn: ValueProblems | null;
   /** Sticky/frozen styling — the source column in split view. */
   sticky?: boolean;
   /** Implicit value shown + edited from when the cell is empty (the key, for the
@@ -2103,12 +2164,18 @@ function EditableCell({
   const isEmpty = !cell || cell.value.trim() === "";
   // Empty source cell → show the key (the implicit base value), dimmed/italic.
   const showFallback = isEmpty && fallback !== undefined;
+  // A cell with nothing in it goes straight into editing on a single click.
+  // The double-click gesture exists to protect text you might want to select or
+  // read; "(untranslated)" is neither, and requiring two clicks to start typing
+  // is friction on the one action the grid exists for.
+  const blank = isEmpty && !showFallback;
+  const editOnSingleClick = !doubleClickToEdit || blank;
   const baseCls = sticky ? "cell col-source cell-editable" : "cell cell-editable";
   let cls = warn ? `${baseCls} cell-warn-box` : baseCls;
   if (onMenu) cls += " cell-has-menu";
   cls += changeClass(changeKind);
   if (active) cls += " cell-active";
-  const editHint = doubleClickToEdit ? "double-click to edit" : "click to edit";
+  const editHint = editOnSingleClick ? "click to edit" : "double-click to edit";
   const title = sticky
     ? showFallback
       ? `Base language — ${editHint} (adds a development value; the key is unchanged)`
@@ -2119,8 +2186,8 @@ function EditableCell({
   return (
     <div
       className={cls}
-      onClick={doubleClickToEdit ? onActivate : onStart}
-      onDoubleClick={doubleClickToEdit ? onStart : undefined}
+      onClick={editOnSingleClick ? onStart : onActivate}
+      onDoubleClick={editOnSingleClick ? undefined : onStart}
       title={title}
       onContextMenu={
         onMenu

@@ -1,14 +1,19 @@
-// Teaching VS Code to open custom catalog patterns in the grid.
+// Teaching VS Code to open catalog patterns in the grid, by default.
 //
-// `contributes.customEditors` is fixed at install time, so a pattern the user
-// adds later (say `*.strings.json`) can only be routed through the
-// `workbench.editorAssociations` setting. We manage exactly the entries we
-// wrote — tracked in globalState — so dropping a pattern from the setting takes
-// its association with it, and an association the user wrote by hand is never
-// touched.
+// `contributes.customEditors` declares the grid as the default editor, but that
+// only settles ties at install time: a pattern the user adds later (say
+// `*.strings.json`) isn't in the manifest at all, and "Reopen with…" records a
+// per-pattern override that outranks the manifest for good. Writing the
+// association explicitly covers both — it is the same setting VS Code itself
+// writes when you pick a default editor from "Reopen with…".
+//
+// Scope is global: which editor opens a file type is a preference about how you
+// work, not about one project. We manage exactly the entries we wrote — tracked
+// in globalState — so dropping a pattern from the setting takes its association
+// with it, and an association written by hand is never touched.
 
 import * as vscode from "vscode";
-import { catalogPatterns, DEFAULT_CATALOG_PATTERNS } from "./config";
+import { catalogPatterns } from "./config";
 
 const MANAGED_KEY = "xcodeI18n.managedAssociations";
 const GRID_VIEW_TYPE = "xcodeI18n.xcstringsEditor";
@@ -36,25 +41,15 @@ function desiredAssociations(patterns: string[]): Record<string, string> {
 export async function syncEditorAssociations(
   context: vscode.ExtensionContext
 ): Promise<void> {
-  // `*.xcstrings` is already claimed by package.json; only the extras need an
-  // association.
-  const extras = catalogPatterns().filter(
-    (p) => !DEFAULT_CATALOG_PATTERNS.includes(p)
-  );
-  const desired = desiredAssociations(extras);
+  const desired = desiredAssociations(catalogPatterns());
   const previous = context.globalState.get<string[]>(MANAGED_KEY) ?? [];
 
   const config = vscode.workspace.getConfiguration();
   const inspected = config.inspect<Record<string, string>>(
     "workbench.editorAssociations"
   );
-  const scope = vscode.workspace.workspaceFolders?.length
-    ? vscode.ConfigurationTarget.Workspace
-    : vscode.ConfigurationTarget.Global;
-  const existing =
-    (scope === vscode.ConfigurationTarget.Workspace
-      ? inspected?.workspaceValue
-      : inspected?.globalValue) ?? {};
+  const scope = vscode.ConfigurationTarget.Global;
+  const existing = inspected?.globalValue ?? {};
 
   const next = { ...existing };
   let changed = false;

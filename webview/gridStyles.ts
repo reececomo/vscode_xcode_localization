@@ -1101,6 +1101,44 @@ html, body { margin: 0; padding: 0; height: 100%; }
 .head-meta { position: relative; }
 .head-meta .head-name { font-weight: 600; }
 
+/* ---- ICU MessageFormat highlighting ----
+   Structure is tinted, text is left alone: the eye should land on the braces
+   and branch names, which is where ICU messages actually go wrong. Braces cycle
+   through three hues by nesting depth so a pair reads as a pair. */
+.icu-brace { opacity: 0.9; }
+.icu-depth-0 { color: var(--vscode-editorBracketHighlight-foreground1, var(--vscode-charts-blue)); }
+.icu-depth-1 { color: var(--vscode-editorBracketHighlight-foreground2, var(--vscode-charts-orange)); }
+.icu-depth-2 { color: var(--vscode-editorBracketHighlight-foreground3, var(--vscode-charts-purple)); }
+.icu-arg {
+  color: var(--vscode-symbolIcon-variableForeground, var(--vscode-charts-blue));
+}
+.icu-type {
+  color: var(--vscode-symbolIcon-keywordForeground, var(--vscode-charts-purple));
+  font-weight: 600;
+}
+.icu-key {
+  color: var(--vscode-symbolIcon-enumeratorMemberForeground, var(--vscode-charts-green));
+}
+.icu-offset {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  font-style: italic;
+}
+/* The hash mark is the count itself — same treatment as a printf specifier,
+   because it plays the same role in the sentence. */
+.icu-hash {
+  color: var(--vscode-charts-blue, var(--vscode-textLink-foreground));
+  font-weight: 600;
+}
+/* A quoted run is ICU syntax switched OFF, so it is shown as the plain text it
+   becomes rather than as structure. */
+.icu-quoted {
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+  opacity: 0.85;
+}
+/* Several problems can land on one cell, so the warning line wraps rather than
+   truncating one of them away. */
+.cell-warn span { white-space: pre-wrap; }
+
 /* ---- Add / remove a language, from the language popover ---- */
 .lang-remove {
   flex: 0 0 auto;

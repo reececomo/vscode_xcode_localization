@@ -19,6 +19,9 @@ export interface Settings {
   /** Allow deleting keys Xcode manages automatically. Off by default, because
    * such a key is extracted from source and returns on the next build. */
   allowRemovingManagedStrings: boolean;
+  /** Parse braced values as ICU messages: highlight their structure and report
+   * the syntax errors that would throw at format time. */
+  validateIcuMessages: boolean;
   /** Display names for language tags `Intl` doesn't know, e.g. "en-Pseudo". */
   languageNames: Record<string, string>;
 }
@@ -108,7 +111,9 @@ export type HostToWebview =
     }
   /** A key was just added (or the host wants it shown): clear any filter hiding
    * it, put the cursor on it and scroll it into view. */
-  | { type: "revealKey"; key: string };
+  | { type: "revealKey"; key: string }
+  /** A code sweep finished (or failed) — clears the toolbar's spinner. */
+  | { type: "syncDone" };
 
 /** Webview → Host */
 export type WebviewToHost =
@@ -165,6 +170,10 @@ export type WebviewToHost =
   /** Delete keys. The host re-checks removability — including a fresh code scan
    * when none has been run — and confirms before writing. */
   | { type: "removeStrings"; keys: string[] }
+  /** Sweep the source for localization calls: extract keys the catalog is
+   * missing, re-file ones the code no longer references, and refresh the usage
+   * counts. The host confirms before writing anything. */
+  | { type: "syncCode" }
   /** Add a language: an empty `new` entry for every key, the same thing Xcode
    * writes. The host prompts for the tag. */
   | { type: "addLanguage" }

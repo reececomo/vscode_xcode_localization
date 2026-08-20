@@ -23,7 +23,7 @@ import {
 import { keyRemovability, type RemovabilityContext } from "../shared/manage";
 import { parseCatalog, type CatalogEntry } from "../shared/xcstrings";
 import {
-  EXCLUDE_GLOB,
+  autoMarkNeedsReview,
   isCatalogFile,
   languageNameOverrides,
   sourceFindGlob,
@@ -31,6 +31,9 @@ import {
   WATCHED_SETTINGS,
 } from "./config";
 import { setLanguageNameOverrides } from "../shared/langName";
+import { countKeyLiterals, literalSearchPattern } from "../shared/sourceScan";
+import { findProjectFiles } from "./projectFiles";
+import { applySync, describeSync, scanForSync } from "./sync";
 import { resolveLprojGroup, detectSourceLanguage, type LprojGroup } from "./lproj";
 import { buildStringsCatalog } from "./stringsModel";
 import { getRepository, getHeadText } from "./git";
@@ -117,6 +120,7 @@ export class XcstringsEditorProvider implements vscode.CustomTextEditorProvider 
       showStateColumn: c.get<boolean>("showStateColumn") ?? true,
       allowRemovingManagedStrings:
         c.get<boolean>("allowRemovingManagedStrings") ?? false,
+      validateIcuMessages: c.get<boolean>("validateIcuMessages") ?? true,
       languageNames: languageNameOverrides(),
     };
   }
@@ -138,6 +142,9 @@ export class XcstringsEditorProvider implements vscode.CustomTextEditorProvider 
     }
     if (settings.showStateColumn !== undefined) {
       void c.update("showStateColumn", settings.showStateColumn, vscode.ConfigurationTarget.Global);
+    }
+    if (settings.validateIcuMessages !== undefined) {
+      void c.update("validateIcuMessages", settings.validateIcuMessages, vscode.ConfigurationTarget.Global);
     }
   }
 
@@ -300,7 +307,17 @@ export class XcstringsEditorProvider implements vscode.CustomTextEditorProvider 
       let label = "";
       switch (msg.type) {
         case "setValue":
-          result = setTranslation(text, msg.key, msg.lang, msg.segments, msg.value, { eol });
+          // Editing the SOURCE string invalidates every translation made from
+          // it, so those are flagged in the SAME edit — one undo puts both back.
+          result = setTranslation(
+            text,
+            msg.key,
+            msg.lang,
+            msg.segments,
+            msg.value,
+            { eol },
+            autoMarkNeedsReview()
+          );
           label = `${msg.key}/${msg.lang}`;
           break;
         case "setComment":
@@ -452,15 +469,18 @@ export class XcstringsEditorProvider implements vscode.CustomTextEditorProvider 
     }
     if (msg.type === "findInCode") {
       // Open VSCode's native search, scoped to source files and pre-filled with
-      // the key as a quoted literal so it matches Text("Save") / Button("Save") /
-      // NSLocalizedString("Save", …) call sites rather than every loose word.
-      // Case-sensitive: localization keys are, and the code literal must match
-      // the key exactly. The host only drives the search — it never reads code.
+      // the key as a quoted literal, so it lands on the Text("Save") /
+      // NSLocalizedString("Save", …) / t('save') call site rather than every
+      // loose occurrence of the word. The pattern accepts all three quote styles
+      // so JavaScript and TypeScript call sites are found as readily as Swift
+      // ones. Case-sensitive: localization keys are, and the literal has to
+      // match the key exactly. The host only drives the search — it never reads
+      // code itself.
       void vscode.commands.executeCommand("workbench.action.findInFiles", {
-        query: `"${msg.key}"`,
+        query: literalSearchPattern(msg.key),
         filesToInclude: sourceIncludeList(),
         triggerSearch: true,
-        isRegex: false,
+        isRegex: true,
         isCaseSensitive: true,
         matchWholeWord: false,
       });
@@ -468,7 +488,11 @@ export class XcstringsEditorProvider implements vscode.CustomTextEditorProvider 
     }
     if (msg.type === "scanUsage") {
       void this.scanUsage(msg.keys).then((res) => {
-        webviewPanel.webview.postMessage(res);
+        webviewPanel.webview.postMessage({
+          type: "usage",
+          counts: res.counts,
+          filesScanned: res.filesScanned,
+        });
         if (res.filesScanned === 0) {
           void vscode.window.showWarningMessage(
             `Xcode Localization: no files matching ${sourceIncludeList()} in this workspace, so there was nothing to scan for key usage. Adjust xcodeI18n.sourceFilePatterns if your code lives elsewhere.`
@@ -485,6 +509,10 @@ export class XcstringsEditorProvider implements vscode.CustomTextEditorProvider 
     }
     if (msg.type === "removeStrings") {
       void this.handleRemoveStrings(document, msg.keys, isCatalog);
+      return true;
+    }
+    if (msg.type === "syncCode") {
+      void this.handleSync(document, isCatalog, post);
       return true;
     }
     if (msg.type === "addLanguage") {
@@ -510,6 +538,88 @@ export class XcstringsEditorProvider implements vscode.CustomTextEditorProvider 
       return true;
     }
     return false;
+  }
+
+  /**
+   * "Sync with code": extract keys the catalog is missing, re-file ones the
+   * source no longer references, and refresh the usage counts — one sweep, one
+   * confirmation. Nothing is deleted and nothing is written without the user
+   * saying yes; the usage counts refresh either way, so cancelling still leaves
+   * the Unused filter up to date.
+   */
+  private async handleSync(
+    document: vscode.TextDocument,
+    isCatalog: boolean,
+    post: (msg: HostToWebview) => void
+  ): Promise<void> {
+    if (!isCatalog) {
+      post({ type: "syncDone" });
+      void vscode.window.showInformationMessage(
+        "Syncing with code works on String Catalogs; a legacy .strings file has no place to record where a key came from."
+      );
+      return;
+    }
+
+    try {
+      const catalog = parseCatalog(document.getText());
+      if (catalog.error) {
+        void vscode.window.showWarningMessage(
+          "This catalog isn't valid JSON, so it can't be synced with your code."
+        );
+        return;
+      }
+
+      const result = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "Syncing catalog with your code…",
+        },
+        () => scanForSync(document.uri, catalog)
+      );
+
+      // Refresh the Unused flags whatever the user decides next.
+      post({
+        type: "usage",
+        counts: result.counts,
+        filesScanned: result.filesScanned,
+      });
+
+      if (result.filesScanned === 0) {
+        void vscode.window.showWarningMessage(
+          `No source files matching ${sourceIncludeList()} under ${vscode.workspace.asRelativePath(
+            result.root,
+            false
+          )}. Adjust xcodeI18n.extractionRoot or xcodeI18n.sourceFilePatterns.`
+        );
+        return;
+      }
+      if (
+        result.added.length === 0 &&
+        result.staled.length === 0 &&
+        result.recommented.length === 0 &&
+        result.reviewCells === 0
+      ) {
+        void vscode.window.showInformationMessage(
+          `Catalog is in sync — ${result.filesScanned} source files scanned, nothing to change.`
+        );
+        return;
+      }
+
+      const confirmed = await vscode.window.showInformationMessage(
+        "Sync this catalog with your code?",
+        { modal: true, detail: describeSync(result) },
+        "Apply"
+      );
+      if (confirmed !== "Apply") return;
+
+      await applySync(document, result);
+    } catch (e) {
+      void vscode.window.showErrorMessage(
+        `Couldn't sync with your code: ${(e as Error).message}`
+      );
+    } finally {
+      post({ type: "syncDone" });
+    }
   }
 
   /**
@@ -574,42 +684,43 @@ export class XcstringsEditorProvider implements vscode.CustomTextEditorProvider 
       if (!verdict.canRemove) blocked.set(key, verdict.reason);
     }
 
-    await confirmRemoveStrings(document, keys, isCatalog, blocked);
+    // Not a blocker — a commented-out call means the string isn't in the app —
+    // but worth saying out loud before the key goes.
+    const mentioned = keys.filter((key) => (scan.mentions[key] ?? 0) > 0);
+    await confirmRemoveStrings(document, keys, isCatalog, blocked, mentioned);
   }
 
   /**
-   * Plan B "Find unused keys": read every Swift / Obj-C source file in the
-   * workspace ONCE and count how often each catalog key appears as a quoted
-   * string literal. No index is kept and no watcher is installed — this runs
-   * only when the user asks. Counting only the keys we were handed (a Set
-   * lookup) keeps it O(matches) work and O(keys) memory regardless of codebase
-   * size.
+   * "Find unused keys": read every configured source file in the workspace ONCE
+   * and count how often each catalog key appears as a quoted string literal (see
+   * `sourceScan.ts` for what counts as one). No index is kept and no watcher is
+   * installed — this runs only when the user asks.
    *
-   * Counting plain `"literal"` matches errs toward "used" (comments and
-   * unrelated literals inflate counts), so a 0 count is a strong-but-not-certain
-   * signal: keys built by interpolation or referenced from storyboards won't be
-   * found. The webview surfaces that caveat; nothing is ever auto-deleted.
+   * Counts references from CODE; mentions inside comments are tallied
+   * separately, because a commented-out call is not a reference but is still
+   * worth mentioning before someone deletes the key.
+   *
+   * A 0 is a strong signal, not a certain one: a key assembled at runtime, held
+   * in a constant, or referenced from a storyboard / XIB won't be found. The
+   * webview surfaces that caveat; nothing is ever deleted automatically.
    */
   private async scanUsage(
     keys: string[]
   ): Promise<{
     type: "usage";
     counts: Record<string, number>;
+    /** Mentions inside comments — reported, never counted as references. */
+    mentions: Record<string, number>;
     filesScanned: number;
   }> {
-    const files = await vscode.workspace.findFiles(
-      sourceFindGlob(),
-      EXCLUDE_GLOB
-    );
+    const files = await findProjectFiles(sourceFindGlob());
     const wanted = new Set(keys);
     const counts: Record<string, number> = {};
-    for (const k of keys) counts[k] = 0;
-    // Quoted literals in the three styles the supported languages use:
-    // double ("…", also Obj-C's @"…" — the @ sits outside the quotes), single
-    // ('…', JS/TS/Python) and backtick (`…`, JS/TS templates). Escapes are
-    // tolerated. Raw (#"…"#) and multiline ("""…""") strings are out of scope.
-    const literal =
-      /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\]|\\.)*)`/g;
+    const mentions: Record<string, number> = {};
+    for (const k of keys) {
+      counts[k] = 0;
+      mentions[k] = 0;
+    }
     for (const file of files) {
       let text: string;
       try {
@@ -619,14 +730,11 @@ export class XcstringsEditorProvider implements vscode.CustomTextEditorProvider 
       } catch {
         continue;
       }
-      literal.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = literal.exec(text)) !== null) {
-        const inner = m[1] ?? m[2] ?? m[3];
-        if (inner !== undefined && wanted.has(inner)) counts[inner]++;
-      }
+      // The file name picks the language rules — crucially, whether a single
+      // quote opens a string or is just an apostrophe.
+      countKeyLiterals(text, wanted, counts, file.path, mentions);
     }
-    return { type: "usage", counts, filesScanned: files.length };
+    return { type: "usage", counts, mentions, filesScanned: files.length };
   }
 
   /**

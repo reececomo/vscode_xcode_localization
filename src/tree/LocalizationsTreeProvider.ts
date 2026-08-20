@@ -14,7 +14,8 @@ import { parseCatalog } from "../shared/xcstrings";
 import { allLanguageProgress } from "../shared/progress";
 import { langFromLproj, detectSourceLanguage, type LprojGroup } from "../editor/lproj";
 import { langName } from "../shared/langName";
-import { catalogFindGlob, EXCLUDE_GLOB } from "../editor/config";
+import { catalogFindGlob } from "../editor/config";
+import { findProjectFiles } from "../editor/projectFiles";
 
 const STRINGS_GLOB = "**/*.lproj/*.strings";
 
@@ -205,7 +206,7 @@ export class LocalizationsTreeProvider implements vscode.TreeDataProvider<Node> 
   }
 
   private async getCatalogs(): Promise<CatalogNode[]> {
-    const uris = await vscode.workspace.findFiles(catalogFindGlob(), EXCLUDE_GLOB);
+    const uris = await findProjectFiles(catalogFindGlob());
     return Promise.all(
       uris.map(async (uri) => ({
         kind: "catalog" as const,
@@ -216,7 +217,7 @@ export class LocalizationsTreeProvider implements vscode.TreeDataProvider<Node> 
   }
 
   private async getTables(): Promise<TableNode[]> {
-    const uris = await vscode.workspace.findFiles(STRINGS_GLOB, EXCLUDE_GLOB);
+    const uris = await findProjectFiles(STRINGS_GLOB);
     // Group by (groupDir, basename) — siblings in the same parent are one table.
     const tables = new Map<string, LprojGroup>();
     for (const uri of uris) {

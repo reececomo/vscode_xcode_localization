@@ -1,12 +1,11 @@
 {
   "name": "xcode-i18n",
-  "displayName": "Xcode Localization",
+  "displayName": "Xcode Localization (fork)",
   "description": "Visual editor for Xcode String Catalogs (.xcstrings) and legacy .strings — localize iOS, iPadOS & macOS apps in VS Code with a spreadsheet grid, clean git diffs, and translation progress.",
-  "version": "1.0.2",
+  "version": "1.1.6",
   "license": "MIT",
   "icon": "assets/icon.png",
-  "publisher": "dphans-github",
-  "private": true,
+  "publisher": "reececomo",
   "repository": {
     "type": "git",
     "url": "https://github.com/dphans/vscode_xcode_localization.git"
@@ -46,14 +45,7 @@
         "selector": [
           {
             "filenamePattern": "*.xcstrings"
-          }
-        ],
-        "priority": "default"
-      },
-      {
-        "viewType": "xcodeI18n.xcstringsEditor",
-        "displayName": "String Catalog",
-        "selector": [
+          },
           {
             "filenamePattern": "*.strings.json"
           }
@@ -168,7 +160,10 @@
       "properties": {
         "xcodeI18n.displayMode": {
           "type": "string",
-          "enum": ["comfortable", "compact"],
+          "enum": [
+            "comfortable",
+            "compact"
+          ],
           "enumDescriptions": [
             "Roomier rows with more padding (default).",
             "Tighter rows so more fit on screen."
@@ -201,15 +196,21 @@
           "default": false,
           "description": "Allow deleting keys that Xcode manages automatically. Off by default: such a key is extracted from your source code, so deleting it here only postpones it until the next build. Keys added by hand can always be deleted."
         },
+        "xcodeI18n.validateIcuMessages": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Parse values containing `{` or `}` as ICU MessageFormat: highlight their structure in the grid and flag the syntax errors that would throw at format time (an unbalanced brace, a `plural` with no `other` branch, an unknown branch name), plus placeholders a translation dropped or invented. Turn off if your strings use braces as literal text."
+        },
         "xcodeI18n.catalogFilePatterns": {
           "type": "array",
           "items": {
             "type": "string"
           },
           "default": [
-            "*.xcstrings"
+            "*.xcstrings",
+            "*.strings.json"
           ],
-          "markdownDescription": "File name patterns opened as String Catalogs, e.g. `*.strings.json`. Patterns other than the built-in `*.xcstrings` are registered in `#workbench.editorAssociations#` so VS Code routes them to this editor; removing a pattern here removes that association again."
+          "markdownDescription": "File name patterns opened as String Catalogs, e.g. `*.strings.json`. Each pattern is registered in `#workbench.editorAssociations#` (globally) so this grid is the default editor for it, with matching `git:` / `gitlens:` entries that keep diffs on the plain-text editor. Removing a pattern here removes its associations again; associations you wrote by hand are left alone."
         },
         "xcodeI18n.sourceFilePatterns": {
           "type": "array",
@@ -219,9 +220,58 @@
           "default": [
             "*.swift",
             "*.m",
-            "*.mm"
+            "*.mm",
+            "*.ts",
+            "*.tsx",
+            "*.js",
+            "*.jsx",
+            "*.mjs",
+            "*.cjs"
           ],
-          "markdownDescription": "File name patterns counted as source code by **Find in code** and **Find unused keys**. Add `*.ts`, `*.tsx`, `*.js` and the like to use this extension outside an Xcode project — quoted literals are matched in double, single and backtick quotes."
+          "markdownDescription": "File name patterns counted as source code by **Find in code** and **Find unused keys**. A key is looked for as a quoted string literal in double, single or backtick quotes, so `Text(\"Save\")`, `NSLocalizedString(\"Save\", …)`, `t('save')` and `` i18n(`save`) `` all count. Add `*.kt`, `*.py`, `*.vue` or anything else you keep call sites in; vendor folders (`node_modules`, `Pods`, `build`, `DerivedData`, …) are always skipped."
+        },
+        "xcodeI18n.translationFunctions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "t",
+            "i18n",
+            "translate",
+            "NSLocalizedString"
+          ],
+          "markdownDescription": "Function names treated as localization calls when extracting strings. A call whose first argument is a string literal — `t(\"key\", …)`, `i18n(\"key\")` — contributes that key. Member calls match on their last segment, so `t` also covers `i18n.t(\"key\")`. Short names like `t` only work because gitignored build output is never scanned; a checked-in minified bundle would still confuse them."
+        },
+        "xcodeI18n.extractionRoot": {
+          "type": "string",
+          "default": "..",
+          "markdownDescription": "Where to look for strings to extract, relative to the catalog file's own folder. The default `..` keeps a sweep inside the module that owns the catalog — `client/lang/messages.xcstrings` scans `client/`, not the whole workspace. Use `../..` to widen it, or `.` to scan only the catalog's folder."
+        },
+        "xcodeI18n.autoMarkNeedsReview": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Flag translations as **needs review** when the source they were made from changes — either you edit a source string in the grid, or a sync finds that a string's text or its plural / device variations moved since your last commit. Only settled translations are flagged; empty ones stay `new` and ones already flagged are left alone."
+        },
+        "xcodeI18n.markMissingKeysStale": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When syncing, mark previously extracted keys that no longer appear in your code as `stale`. Nothing is deleted — a stale key keeps its translations, and the **−** button can then remove it once it has none. Hand-added (`manual`) and `migrated` keys are never re-filed."
+        },
+        "xcodeI18n.excludePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/*.test.*",
+            "**/*.spec.*",
+            "**/__tests__/**",
+            "**/__mocks__/**"
+          ],
+          "markdownDescription": "Files and folders never scanned. **Gitignored files are already skipped**, which is what keeps build output such as `dist/` — where minified code makes every one-letter local look like a `t(\"…\")` call — out of extraction and usage counts; `node_modules` and `.git` are named only to avoid walking a large tree just to discard it. Tests are named because they are *not* gitignored: a string in a test is an assertion about the app rather than part of it, so extracting from one invents entries nobody ships, and counting one as a reference would keep a dead key alive long after the feature was deleted."
         },
         "xcodeI18n.languageNames": {
           "type": "object",
@@ -238,13 +288,16 @@
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit",
-    "vscode:prepublish": "node esbuild.js --production"
+    "vscode:prepublish": "node esbuild.js --production",
+    "package": "vsce package --out xcode-i18n.vsix",
+    "install-local": "npm version patch --no-git-tag-version && npm run package && code --install-extension xcode-i18n.vsix --force"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.21.5",
     "typescript": "^5.4.5"
   },

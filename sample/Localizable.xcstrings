@@ -1,40 +1,58 @@
 {
-  "sourceLanguage" : "en",
-  "strings" : {
-    "%lld items in cart" : {
-      "comment" : "Cart badge. Keep the number first.",
-      "localizations" : {
-        "en" : {
-          "variations" : {
-            "plural" : {
-              "one" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "%lld item in cart"
+  "sourceLanguage": "en",
+  "strings": {
+    "%lld items in cart": {
+      "comment": "Cart badge. Keep the number first.",
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld item in cart"
                 }
               },
-              "other" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "%lld items in cart"
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld items in cart"
                 }
               }
             }
           }
         },
-        "fr" : {
-          "variations" : {
-            "plural" : {
-              "one" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "%lld article dans le panier"
+        "es-419": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld item no carrinho"
                 }
               },
-              "other" : {
-                "stringUnit" : {
-                  "state" : "new",
-                  "value" : ""
+              "other": {
+                "stringUnit": {
+                  "state": "new",
+                  "value": ""
+                }
+              }
+            }
+          }
+        },
+        "fr": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld article dans le panier"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "new",
+                  "value": ""
                 }
               }
             }
@@ -42,65 +60,191 @@
         }
       }
     },
-    "Cancel" : {
-      "comment" : "Dismisses the sheet without saving.",
-      "localizations" : {
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Annuler"
+    "Cancel": {
+      "comment": "Dismisses the sheet without saving.",
+      "localizations": {
+        "es-419": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abortar"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Annuler"
           }
         }
       }
     },
-    "Continue" : {
-      "comment" : "Primary button on the onboarding screen.",
-      "localizations" : {
-        "fr" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "Continuer"
+    "Continue": {
+      "comment": "Primary button on the onboarding screen.",
+      "localizations": {
+        "es-419": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Continuar"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Continuer"
           }
         }
       }
     },
-    "Hand-written string" : {
-      "comment" : "Added in the editor, so it is yours to delete.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "fr" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : ""
+    "Hand-written string": {
+      "comment": "Added in the editor, so it is yours to delete.",
+      "extractionState": "manual",
+      "localizations": {
+        "es-419": {
+          "stringUnit": {
+            "state": "new",
+            "value": ""
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "new",
+            "value": ""
           }
         }
       }
     },
-    "Removed from the code a while ago" : {
-      "extractionState" : "stale"
-    },
-    "Stale but already translated" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Périmé mais déjà traduit"
+    "Removed from the code a while ago": {
+      "extractionState": "stale",
+      "localizations": {
+        "es-419": {
+          "stringUnit": {
+            "state": "new",
+            "value": ""
           }
         }
       }
     },
-    "Welcome, %@!" : {
-      "comment" : "Greeting on the home screen. %@ is the member's first name.",
-      "localizations" : {
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bienvenue !"
+    "Stale but already translated": {
+      "extractionState": "stale",
+      "localizations": {
+        "es-419": {
+          "stringUnit": {
+            "state": "new",
+            "value": ""
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Périmé mais déjà traduit"
+          }
+        }
+      }
+    },
+    "Welcome, %@!": {
+      "comment": "Greeting on the home screen. %@ is the member's first name.",
+      "localizations": {
+        "es-419": {
+          "stringUnit": {
+            "state": "new",
+            "value": ""
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bienvenue !"
+          }
+        }
+      }
+    },
+    "{count, plural, one {# unread message} other {# unread messages}}": {
+      "comment": "ICU plural. Valid in both languages.",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "{count, plural, one {# message non lu} other {# messages non lus}}"
+          }
+        }
+      }
+    },
+    "{gender, select, female {She} male {He} other {They}} shared {count, plural, one {a photo} other {# photos}}": {
+      "comment": "Nested ICU select + plural, to show brace-depth colouring.",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "{gender, select, female {Elle} male {Il} other {Iel}} a partagé {count, plural, one {une photo} other {# photos}}"
+          }
+        }
+      }
+    },
+    "ICU: missing other branch": {
+      "comment": "The translation drops the required fallback branch — ICU throws at format time.",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "{count, plural, one {# élément}}"
+          }
+        }
+      }
+    },
+    "ICU: unbalanced brace": {
+      "comment": "The translation is missing its closing brace.",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "{count, plural, one {# élément} other {# éléments}"
+          }
+        }
+      }
+    },
+    "ICU: misspelled branch": {
+      "comment": "\"ones\" is not a CLDR plural category.",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "{count, plural, ones {# élément} other {# éléments}}"
+          }
+        }
+      }
+    },
+    "Signed in as {name}": {
+      "comment": "The translation renames the placeholder, so it never substitutes.",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connecté en tant que {nom}"
+          }
+        }
+      }
+    },
+    "Escaped '{braces}' stay literal": {
+      "comment": "Quoted runs turn ICU syntax back into plain text.",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Les '{accolades}' restent littérales"
+          }
+        }
+      }
+    },
+    "{0} has a secret plan. You''ll see. You''ll all see.": {
+      "comment": "Doubled apostrophes are ICU escapes — the preview resolves them to one.",
+      "localizations": {
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "{0} a un plan secret. Vous verrez. Vous verrez tous."
           }
         }
       }
     }
   },
-  "version" : "1.0"
+  "version": "1.0"
 }
